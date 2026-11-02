@@ -1,0 +1,24 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Copyrighted reference material must stay out of the repository.
+# Textbooks, standards and slides live locally or in access-controlled storage.
+references/
+*.pdf
+*.ppt
+*.pptx
+*.zip
+
+# Generated reports
+*_report.xlsx
+*_report.pdf
