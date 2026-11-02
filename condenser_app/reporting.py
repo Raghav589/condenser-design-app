@@ -105,7 +105,7 @@ def to_pdf(result: DesignResult, inputs: Any) -> bytes:
     base = getSampleStyleSheet()
     body = ParagraphStyle("body", parent=base["BodyText"], fontSize=8.5, leading=10.5)
     small = ParagraphStyle("small", parent=body, fontSize=7.5, leading=9)
-    head = ParagraphStyle("head", parent=base["Heading2"], textColor=colors.HexColor("#19468C"), fontSize=11.5, spaceBefore=8, spaceAfter=3)
+    head = ParagraphStyle("head", parent=base["Heading2"], textColor=colors.HexColor("#19468C"), fontSize=11.5, spaceBefore=8, spaceAfter=3, keepWithNext=1)
 
     def table(rows: list[list[Any]], widths: list[float]) -> Table:
         cells = [[Paragraph(_safe(c), small) for c in row] for row in rows]

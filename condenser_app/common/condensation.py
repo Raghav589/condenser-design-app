@@ -775,9 +775,12 @@ def friedel_terms(fluid: CondensingFluidProperties, m: float, x: float, D: float
     Fr = m^2/(g D rho_TP^2); We = m^2 D/(rho_TP sigma); rho_TP = [x/rho_G + (1-x)/rho_L]^-1.
     Range: HSB: "for vertical upward flow and horizontal flow. A slightly different correlation is used for vertical downflow", which it does not
     give. HSB nevertheless uses this form for downflow in Ex. 16.2 and Ex. 16.6, and this library follows that; the downflow version is a source gap.
-    Requires sigma. Tested: Ex. 16.2 (57.08, 7360 Pa/m), Ex. 10.1 (5.101, 687.8 Pa/m). Ex. 16.5 prints 9.110 where its own terms give 9.19.
+    Requires sigma and eta_G < eta_L, because (1 - eta_G/eta_L)^0.7 has no real value otherwise.
+    Tested: Ex. 16.2 (57.08, 7360 Pa/m), Ex. 10.1 (5.101, 687.8 Pa/m). Ex. 16.5 prints 9.110 where its own terms give 9.19.
     """
     _need(fluid, "rho_l", "rho_v", "mu_l", "mu_v", "sigma")
+    if fluid.mu_v >= fluid.mu_l:
+        raise ValueError(f"The Friedel correlation needs vapour viscosity below liquid viscosity; got mu_v = {fluid.mu_v:g} and mu_l = {fluid.mu_l:g} Pa.s. Check the entered viscosities.")
     pg = phase_gradients(fluid, m, x, D)
     e = (1.0 - x) ** 2 + x**2 * fluid.rho_l * pg.f_go / (fluid.rho_v * pg.f_lo)
     f = x**0.78 * (1.0 - x) ** 0.24

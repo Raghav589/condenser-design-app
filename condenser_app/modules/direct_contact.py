@@ -294,7 +294,8 @@ def _drop_rates(v: float, d: float, rho_g: float, mu_g: float, rho_l: float) -> 
 def drop_path_with_gravity(v_in, t, d, rho_g, mu_g, rho_l, steps: int) -> tuple[float, float]:
     """Integrate HSB Eq. 22.1 downward with Eq. 22.4 by RK4. Returns (distance, final velocity)."""
     def dv(v):
-        g_net, drag = _drop_rates(v, d, rho_g, mu_g, rho_l)
+        # A coarse step can overshoot zero when drag is strong. The true velocity stays positive, since gravity acts along the motion.
+        g_net, drag = _drop_rates(max(v, 1e-9), d, rho_g, mu_g, rho_l)
         return g_net - drag
 
     v, x, dt = v_in, 0.0, t / steps
