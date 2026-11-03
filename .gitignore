@@ -22,3 +22,7 @@ references/
 # Generated reports
 *_report.xlsx
 *_report.pdf
+
+# Group D's own deliverables are the one exception.
+!deliverables/
+!deliverables/**

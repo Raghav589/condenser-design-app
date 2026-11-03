@@ -31,8 +31,8 @@ The book says the chart is a broad indication and should not be slavishly follow
 | Air-cooled heat exchanger | `air_cooled` |
 | Plate heat exchanger | `plate` |
 | Spray condenser, baffle column condenser | `direct_contact` |
-| Vertical tube-side condenser | `vertical_shell_tube` |
-| Plate-fin; vertical reflux; vertical shell-side; all horizontal types | Selected and named, with a warning that no design module exists in this application |
+| Vertical tube-side, vertical tube-side reflux, vertical shell-side | `vertical_shell_tube`, with the matching variant chosen |
+| Plate-fin; all horizontal types | Selected and named, with a warning that no design module exists in this application |
 
 ## Fluid allocation
 
