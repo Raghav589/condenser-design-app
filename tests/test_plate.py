@@ -1,7 +1,7 @@
 """Plate condenser module.
 
-No source works a condensing plate example. The BENCHMARK tests are single-phase PHE examples of the coolant-side and
-sizing path (HSB Ex. 8.1-8.4, HEDH 3.7.10), run through the module's own functions; the two-phase relations are
+No source works a complete condensing plate example. The BENCHMARK tests are single-phase PHE examples of the coolant-side
+and sizing path (HSB Ex. 8.1-8.4, HEDH 3.7.10), run through the module's own functions; the two-phase relations are
 benchmarked only where HSB Ch. 10 works numbers. Everything else is a hand check, limit, closure or trend, not a benchmark.
 """
 import copy
@@ -12,8 +12,24 @@ import pytest
 from condenser_app.common.thermal import lmtd, lmtd_counterflow
 from condenser_app.modules import MODULES
 from condenser_app.modules.plate import (
+    AQUEOUS,
+    BOOK_COEFFICIENTS,
+    FIG1_AREA_FLOW,
+    FIG2_ALPHA_DP,
+    FIG3_DP,
+    FIG3_PLATE_FLOW,
+    GASKETS,
+    KETONE,
     MAX_PLATES,
+    PRESET_ENTERED,
+    PRESET_HEDH,
+    PRESET_HSB,
+    REFERENCE_WATER,
+    STRONG_ACID,
     akers_mass_flux,
+    alpha_from_dp,
+    approximate_plate_count,
+    approximate_side,
     channel_dp,
     channel_mass_flow,
     chisholm_c,
@@ -21,11 +37,15 @@ from condenser_app.modules.plate import (
     end_effect_factor,
     equivalent_diameter,
     friction_factor,
+    gasket_compatibility,
     ntu_counterflow,
     nusselt,
     overall_u,
     phi_l_squared,
     plate_area,
+    plate_area_from_flow,
+    plate_coefficients,
+    plate_flow_from_dp,
     port_dp,
     property_correction_factors,
     smallest_plate_count,
@@ -57,6 +77,13 @@ def run(mutate=None):
 
 def check(result, name):
     return next(c for c in result.checks if c.name == name)
+
+
+def entered(i):
+    """Switch to typed coefficients, with the HSB fit's values."""
+    k = i.correlation
+    k.correlation_preset = PRESET_ENTERED
+    k.correlation_name, k.C_h, k.y, k.n_pr, k.K_p, k.z, k.re_min = "HSB Ex. 8.1 and 8.2", C_H, Y, N_PR, K_P, Z, 150.0
 
 
 def h_channel(M, N, rho, mu, k, cp, passes=1, enh=1.0):
@@ -203,10 +230,58 @@ def test_benchmark_hsb_example_8_4_chevron_angle(enh_h, enh_f, n_passages, re, f
 
 # ------------------------------------------------------------------- BENCHMARK: HEDH Sec. 3.7.10
 def test_benchmark_hedh_example_1_property_corrections():
-    # Book rounds to 0.17 and 1.34. The chart readings (a, alpha, q) are not reproduced; the curves are not digitised.
+    # Book rounds to 0.17 and 1.34.
     psi, phi_dp = property_correction_factors(rho=880.0, cp=1926.0, k=0.125, mu=3e-3)
     assert psi == pytest.approx(0.17, abs=0.005)
     assert phi_dp == pytest.approx(1.34, abs=0.005)
+
+
+# Tolerances for the chart readings. The digitised curves carry a read uncertainty of 1 to 3%, and the book reads by eye.
+# Its dashed construction lines also sit off its stated values: B at V = 0.0312 (text 0.034), the lower Fig. 3 dash at
+# dP = 31 (text 33.3), so those readings differ most.
+WASH_OIL = dict(rho=880.0, cp=1926.0, k=0.125, mu=3e-3)
+WATER_313 = REFERENCE_WATER  # Ex. 2: 'the overall corrections for physical properties would be small and may be ignored'
+
+
+def test_benchmark_hedh_example_1_chart_readings():
+    area = plate_area_from_flow(8.8e-3)
+    assert area == pytest.approx(0.27, rel=0.015)
+    side = approximate_side(130.0 / 8.0, area, **WASH_OIL)
+    assert side.alpha == pytest.approx(1200, rel=0.06)  # the book reads 1200 on curve D; the curve gives about 1140 to 1150
+    assert side.q == pytest.approx(0.44e-3, rel=0.05)
+    assert approximate_plate_count(8, 8.8e-3, side.q) == pytest.approx(320, rel=0.05)
+
+
+def test_benchmark_hedh_example_2_chart_readings():
+    area = plate_area_from_flow(34e-3)
+    assert area == pytest.approx(0.52, rel=0.04)  # book point B is drawn at V = 0.0312, a = 0.518
+    side_1 = approximate_side(100.0 / 3.0, 0.52, **WATER_313)
+    side_2 = approximate_side(150.0 / 3.0, 0.52, **WATER_313)
+    assert side_1.alpha == pytest.approx(9000, rel=0.02)
+    assert side_2.alpha == pytest.approx(10200, rel=0.02)
+    assert overall_u(side_1.alpha, side_2.alpha) == pytest.approx(4780, rel=0.02)
+    assert side_1.q == pytest.approx(0.85e-3, rel=0.06)
+    assert side_2.q == pytest.approx(1.1e-3, rel=0.035)
+    n = approximate_plate_count(3, 34e-3, max(side_1.q, side_2.q))
+    assert n == pytest.approx(185, rel=0.04)
+    assert n * area == pytest.approx(96.2, rel=0.05)
+
+
+def test_chart_data_interpolates_through_its_nodes_and_is_monotonic():
+    for v_dot, a in FIG1_AREA_FLOW:
+        assert plate_area_from_flow(v_dot) == pytest.approx(a)
+    for dp, alpha in FIG2_ALPHA_DP:
+        assert alpha_from_dp(dp) == pytest.approx(alpha)
+    for area, flows in FIG3_PLATE_FLOW.items():
+        assert len(flows) == len(FIG3_DP)
+        for dp, q in zip(FIG3_DP, flows):
+            assert plate_flow_from_dp(dp, area) == pytest.approx(q * 1e-3)
+    assert plate_flow_from_dp(50.0, 0.1) < plate_flow_from_dp(50.0, 0.3) < plate_flow_from_dp(50.0, 2.0)
+    assert plate_flow_from_dp(20.0, 0.5) < plate_flow_from_dp(30.0, 0.5)
+
+
+def test_water_at_313_k_needs_no_shift():
+    assert property_correction_factors(**WATER_313) == pytest.approx((1.0, 1.0))
 
 
 def test_benchmark_hedh_example_2_reciprocal_and_lmtd():
@@ -293,8 +368,153 @@ def test_example_is_cited_as_illustrative_and_runs():
     result = run()
     assert result.status is Status.OK_WITH_WARNINGS
     assert result.get("n_plates") % 2 == 1
-    assert any("No source works a condensing plate example" in g for g in result.source_gaps)
-    assert any("proprietary" in a for a in result.assumptions)
+    assert any("No source works a complete condensing plate example" in g for g in result.scope_limits)
+    assert any("proprietary" in a for a in result.design_basis)
+
+
+def test_wording_states_the_akers_choice_and_the_scope():
+    result = run()
+    gaps = " ".join(result.scope_limits)
+    assert "common-mass-flux evaluation" in gaps and "'at the local conditions'" in gaps
+    assert "Outside this module's scope" in gaps
+
+
+# ------------------------------------------------------------------------ book correlations
+def test_example_runs_on_a_preset_with_nothing_typed():
+    i = example()
+    assert i.correlation.correlation_preset == PRESET_HSB
+    assert i.correlation.C_h is None and i.correlation.K_p is None
+    result = run_design("plate", i)
+    assert result.get("correlation") == PRESET_HSB
+    # Regression on the illustrative example: these were its values with typed coefficients.
+    assert result.get("n_plates") == 15
+    assert result.get("U") == pytest.approx(2901, abs=1)
+
+
+def test_preset_and_the_same_typed_coefficients_agree():
+    preset, typed = run(), run(entered)
+    assert typed.get("correlation") == "HSB Ex. 8.1 and 8.2"
+    for key in ("n_plates", "U", "h_coolant", "dp_condensing", "dp_coolant"):
+        assert typed.get(key) == pytest.approx(preset.get(key))
+
+
+def test_preset_values_are_the_books():
+    hsb, hedh = BOOK_COEFFICIENTS[PRESET_HSB], BOOK_COEFFICIENTS[PRESET_HEDH]
+    assert (hsb.C_h, hsb.y, hsb.n_pr, hsb.K_p, hsb.z, hsb.m_visc) == (0.4, 0.64, 0.4, 2.78, 0.18, 0.1)
+    assert (hedh.C_h, hedh.y, hedh.n_pr, hedh.K_p, hedh.z, hedh.m_visc) == (0.2, 0.67, 0.4, 1.22, 0.252, 0.1)
+    assert (hsb.re_min, hedh.re_min) == (150.0, 1000.0)
+
+
+def test_hedh_preset_by_hand():
+    def intermating(i):
+        no_limits(i)
+        i.correlation.correlation_preset = PRESET_HEDH
+        i.coolant.mu_wall = 2.5e-4
+
+    i = example()
+    intermating(i)
+    k = plate_coefficients(i.correlation)
+    ev = _evaluate(i, _duty(i), 15)
+    pr = 4183.0 * 5.05e-4 / 0.648
+    assert ev.nu_c == pytest.approx(0.2 * ev.re_c**0.67 * pr**0.4 * (5.05e-4 / 2.5e-4) ** 0.1)
+    # HEDH 3.7.4 Eq. 2 at the coolant Reynolds number, in the module's friction function.
+    assert friction_factor(ev.re_c, k.K_p, k.z) == pytest.approx(1.22 / ev.re_c**0.252)
+
+
+def test_hedh_friction_equation_is_the_modules():
+    # HEDH 3.7.4 Eq. 1: dP = 2 f L G^2/(rho d_e). HSB and the module: dP = 4 f (L/De)(G^2/2 rho). The same f.
+    f, length, de, G, rho = 0.3, 1.2, 8e-3, 400.0, 990.0
+    assert channel_dp(f, length, de, G, rho) == pytest.approx(2 * f * length * G**2 / (rho * de))
+
+
+def test_reynolds_validity_of_the_preset_is_reported():
+    def viscous_intermating(i):
+        no_limits(i)
+        i.correlation.correlation_preset = PRESET_HEDH
+        i.coolant_props.mu = 5e-3  # lowers Re below HEDH's 1000
+
+    result = run(viscous_intermating)
+    assert check(result, "Coolant Reynolds number in the correlation range").state is CheckState.FAIL
+    assert "1000" in check(result, "Coolant Reynolds number in the correlation range").detail
+    # Upper end: the plotted axis stops at Re = 10000, which only the book fits carry. The example's first zone passes it.
+    name = "Reynolds numbers within the plotted range of the correlation"
+    example_result = run()
+    assert example_result.get("Re_Le_max") > 1e4
+    assert check(example_result, name).state is CheckState.FAIL
+    assert check(run(lambda i: setattr(i.condensing, "rho_v", 5.0)), name).state is CheckState.PASS  # denser vapour, lower G_Le
+    assert not [c for c in run(entered).checks if c.name == name]
+
+
+def test_area_basis_is_checked_against_the_correlation():
+    def hsb_developed(i):
+        i.geometry.area_basis = "developed"
+
+    def hedh_developed(i):
+        i.geometry.area_basis = "developed"
+        i.correlation.correlation_preset = PRESET_HEDH
+
+    def hedh_projected(i):
+        i.correlation.correlation_preset = PRESET_HEDH
+
+    name = "Area basis matches the correlation"
+    assert check(run(), name).state is CheckState.PASS
+    assert check(run(hsb_developed), name).state is CheckState.FAIL
+    assert check(run(hedh_developed), name).state is CheckState.PASS
+    assert check(run(hedh_projected), name).state is CheckState.PASS
+
+
+def test_typed_coefficients_show_only_when_entered():
+    i = example()
+    assert "correlation.C_h" not in MODULE.relevant_fields(i)
+    assert "correlation.correlation_preset" in MODULE.relevant_fields(i)
+    entered(i)
+    assert {"correlation.C_h", "correlation.K_p", "correlation.m_visc"} <= MODULE.relevant_fields(i)
+
+
+def test_chevron_warning_stays_off_for_the_intermating_fit():
+    def angle(i):
+        i.geometry.chevron_angle = 60.0
+        i.correlation.correlation_preset = PRESET_HEDH
+
+    assert not any("HSB Ex. 8.4 uses" in w for w in run(angle).warnings)
+
+
+# ---------------------------------------------------------- HEDH 3.7.10C as a cross-check in the result
+def large_flow(i):
+    # 2 kg/s of steam: the coolant flow lands on Fig. 1.
+    i.vapour.m_dot = 2.0
+    i.geometry.L, i.geometry.W = 1.5, 0.5
+    i.geometry.port_d, i.geometry.port_d_vapour = 0.2, 0.3
+
+
+def test_cross_check_reports_area_alpha_and_plate_flow():
+    i = example()
+    large_flow(i)
+    result = run_design("plate", i)
+    v_dot = result.get("m_dot_coolant") / 985.2
+    area = plate_area_from_flow(v_dot)
+    side = approximate_side(100.0, area, rho=985.2, cp=4183.0, k=0.648, mu=5.05e-4)
+    assert result.get("approx_plate_area") == pytest.approx(area)
+    assert result.get("approx_alpha") == pytest.approx(side.alpha)
+    assert result.get("approx_plate_flow") == pytest.approx(side.q)
+    assert result.get("approx_n_plates") == pytest.approx(2 * v_dot / side.q)
+    assert check(result, "Approximate-design charts cover the coolant duty").state is CheckState.PASS
+    assert check(result, "Coolant within the viscosity limit of the approximate design").state is CheckState.PASS
+
+
+def test_cross_check_leaves_out_what_is_off_the_chart():
+    result = run()  # 1.1e-3 m3/s of coolant is below the drawn Fig. 1
+    assert result.get("approx_plate_area") == "outside the chart"
+    assert isinstance(result.get("approx_alpha"), float)
+    c = check(result, "Approximate-design charts cover the coolant duty")
+    assert c.state is CheckState.NOT_ASSESSED and "Fig. 1" in c.detail
+
+
+def test_viscous_coolant_fails_the_approximate_design_limit():
+    def oil(i):
+        i.coolant_props.mu = 5e-3
+
+    assert check(run(oil), "Coolant within the viscosity limit of the approximate design").state is CheckState.FAIL
 
 
 def test_every_output_requested_is_present():
@@ -412,7 +632,7 @@ def test_iteration_is_recorded_and_stops_at_the_smallest_count():
     result = run(no_limits)
     info = result.convergence[0]
     assert info.converged and info.rows and len(info.rows[0]) == len(info.columns)
-    assert any("First guess" in a for a in result.assumptions)
+    assert any("First guess" in a for a in result.design_basis)
     N = result.get("n_plates")
     assert result.get("sized_by") == "duty"
     assert result.get("area") >= result.get("area_required")
@@ -581,16 +801,99 @@ def test_gasket_and_operating_limits():
     assert check(result, "Flammable or toxic fluid with gaskets").state is CheckState.FAIL
 
 
-def test_limits_at_180_degc_and_30_bar_pass():
+def test_limits_at_180_degc_and_20_bar_pass():
     def at_limit(i):
         i.condensing.T_sat = 180.0
-        i.vapour.pressure = 30e5
+        i.vapour.pressure = 20e5
         i.geometry.gasket_material = None
 
     result = run(at_limit)
     assert check(result, "Operating temperature limit").state is CheckState.PASS
     assert check(result, "Operating pressure limit").state is CheckState.PASS
     assert check(result, "Gasket material temperature limit").state is CheckState.NOT_ASSESSED
+    assert check(result, "Gasket compatibility with the condensing fluid").state is CheckState.NOT_ASSESSED
+
+
+def test_pressure_limit_is_hedh_for_gasketed_and_hsb_for_welded():
+    def at_25_bar(i):
+        i.vapour.pressure = 25e5
+
+    def welded_25(i):
+        at_25_bar(i)
+        i.geometry.construction = "brazed or welded"
+
+    def welded_31(i):
+        welded_25(i)
+        i.vapour.pressure = 31e5
+
+    gasketed = check(run(at_25_bar), "Operating pressure limit")
+    assert gasketed.state is CheckState.FAIL and "2000 kN/m2" in gasketed.detail and "HSB Table 4.1" in gasketed.detail
+    assert check(run(welded_25), "Operating pressure limit").state is CheckState.PASS
+    assert check(run(welded_31), "Operating pressure limit").state is CheckState.FAIL
+
+
+def test_gasket_table_is_hedh_table_2():
+    assert {name: g.t_max_c for name, g in GASKETS.items()} == {
+        "styrene-butadiene (SBR)": 87.0, "acrylonitrile-butadiene (nitrile)": 137.0, "isobutylene-isoprene (butyl)": 152.0,
+        "ethylene-propylene (EPDM)": 152.0, "fluorocarbon (Viton)": 177.0, "silicone": None, "compressed asbestos fibre": 250.0,
+    }
+    assert gasket_compatibility("acrylonitrile-butadiene (nitrile)", AQUEOUS) is True
+    assert gasket_compatibility("acrylonitrile-butadiene (nitrile)", STRONG_ACID) is False
+    assert gasket_compatibility("fluorocarbon (Viton)", KETONE) is False
+    assert gasket_compatibility("isobutylene-isoprene (butyl)", KETONE) is True
+    assert gasket_compatibility("ethylene-propylene (EPDM)", AQUEOUS) is None  # the row names neither
+
+
+@pytest.mark.parametrize(
+    "material,fluid,state",
+    [
+        ("acrylonitrile-butadiene (nitrile)", AQUEOUS, CheckState.PASS),
+        ("acrylonitrile-butadiene (nitrile)", STRONG_ACID, CheckState.FAIL),
+        ("fluorocarbon (Viton)", KETONE, CheckState.FAIL),
+        ("ethylene-propylene (EPDM)", AQUEOUS, CheckState.NOT_ASSESSED),
+        ("acrylonitrile-butadiene (nitrile)", None, CheckState.NOT_ASSESSED),
+    ],
+)
+def test_gasket_compatibility_check(material, fluid, state):
+    def pair(i):
+        i.geometry.gasket_material = material
+        i.vapour.fluid_class = fluid
+
+    c = check(run(pair), "Gasket compatibility with the condensing fluid")
+    assert c.state is state and "HEDH 4.4.2 Table 2" in c.detail
+
+
+def test_unlisted_gasket_pair_names_what_is_listed():
+    def pair(i):
+        i.geometry.gasket_material = "ethylene-propylene (EPDM)"
+
+    detail = check(run(pair), "Gasket compatibility with the condensing fluid").detail
+    assert "acrylonitrile-butadiene (nitrile)" in detail and "styrene-butadiene (SBR)" in detail
+
+
+@pytest.mark.parametrize(
+    "material,t_sat,state",
+    [
+        ("acrylonitrile-butadiene (nitrile)", 136.0, CheckState.PASS),  # above Lecture 13's 135: HEDH's 137 is the one used
+        ("acrylonitrile-butadiene (nitrile)", 138.0, CheckState.FAIL),
+        ("styrene-butadiene (SBR)", 95.0, CheckState.FAIL),
+        ("silicone", 100.0, CheckState.NOT_ASSESSED),
+    ],
+)
+def test_gasket_temperature_limit_is_hedh_table_2(material, t_sat, state):
+    def hot(i):
+        i.condensing.T_sat = t_sat
+        i.geometry.gasket_material = material
+
+    assert check(run(hot), "Gasket material temperature limit").state is state
+
+
+def test_fouling_and_stress_checks_state_their_basis():
+    result = run()
+    fouling = check(result, "Fouling resistances against the plate rule")
+    assert fouling.state is CheckState.NOT_ASSESSED and "one-fifth" in fouling.detail and "Lecture 13" in fouling.source
+    code = check(result, "Plate, frame and tie-bolt strength, and pressure-boundary code")
+    assert "no procedure in HSB or HEDH" in code.detail
 
 
 def test_welded_unit_uses_its_own_range_and_drops_the_gasket_checks():
@@ -613,6 +916,7 @@ def test_vacuum_is_flagged():
 def test_correlation_range_is_checked_where_used():
     def slow(i):
         no_limits(i)
+        entered(i)
         i.correlation.re_min = 1e5
 
     result = run(slow)
@@ -664,12 +968,22 @@ def test_missing_inputs_are_named():
     result = run_design("plate", MODULE.new_inputs())
     assert result.status is Status.INVALID_INPUT
     fields = {issue.field for issue in result.input_issues}
-    assert {"geometry.L", "geometry.W", "geometry.b", "correlation.C_h", "correlation.K_p", "condensing.T_sat", "vapour.m_dot", "coolant.T_in", "coolant_props.rho"} <= fields
+    assert {"geometry.L", "geometry.W", "geometry.b", "condensing.T_sat", "vapour.m_dot", "coolant.T_in", "coolant_props.rho"} <= fields
+    assert not {"correlation.C_h", "correlation.K_p"} & fields  # the default preset needs nothing typed
 
 
-def test_correlation_coefficients_have_no_defaults():
+def test_typed_coefficients_have_no_defaults_and_are_required_when_entered():
     inputs = MODULE.new_inputs()
+    assert inputs.correlation.correlation_preset == PRESET_HSB
     assert inputs.correlation.C_h is None and inputs.correlation.y is None and inputs.correlation.K_p is None and inputs.correlation.z is None
+
+    def missing(i):
+        i.correlation.correlation_preset = PRESET_ENTERED
+
+    result = run(missing)
+    assert result.status is Status.INVALID_INPUT
+    fields = {issue.field for issue in result.input_issues}
+    assert {"correlation.C_h", "correlation.y", "correlation.n_pr", "correlation.K_p", "correlation.z", "correlation.re_min"} <= fields
 
 
 @pytest.mark.parametrize(
@@ -684,7 +998,7 @@ def test_correlation_coefficients_have_no_defaults():
         (lambda i: setattr(i.solver, "n_zones", 2.5), "solver.n_zones"),
         (lambda i: (setattr(i.geometry, "area_basis", "developed"), setattr(i.geometry, "phi", None)), "geometry.phi"),
         (lambda i: setattr(i.geometry, "b", 1.0), "geometry.b"),
-        (lambda i: setattr(i.coolant, "mu_wall", 1e-4), "correlation.m_visc"),
+        (lambda i: (entered(i), setattr(i.coolant, "mu_wall", 1e-4)), "correlation.m_visc"),
         (lambda i: setattr(i.geometry, "L", -1.0), "geometry.L"),
         (lambda i: setattr(i.correlation, "y", 1.5), "correlation.y"),
         (lambda i: (setattr(i.coolant, "passes", 2), setattr(i.coolant, "direction", "cocurrent")), "coolant.direction"),

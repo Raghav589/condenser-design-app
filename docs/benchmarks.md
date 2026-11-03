@@ -2,7 +2,7 @@
 
 All values are computed from the inputs when `pytest` runs. No answer is stored in engineering code. Full tables, with the cause of each difference, are in `docs/algorithms/`.
 
-**The main limit: the project's supplied numerical examples were not available, and no source works a complete vertical shell-and-tube, vertical downflow air-cooled, or condensing plate example.** Those paths are benchmarked piece by piece only.
+**No source works a complete vertical shell-and-tube, vertical downflow air-cooled, or condensing plate example.** Those paths are benchmarked piece by piece only.
 
 ## What each module's benchmarks actually cover
 
@@ -10,8 +10,8 @@ All values are computed from the inputs when `pytest` runs. No answer is stored 
 |---|---|---|---|
 | Selection | Not applicable | Each of the 13 chart outcomes reached by its own path | Chart answers are judgement calls; no numbers to compare |
 | Direct-contact | Yes: spray, sheet, packed bed, bubble | HSB Ex. 22.1-22.4 | Jet, fan, baffle column, pool, and balances with superheat or a vent |
-| Plate | **No** | Coolant side and sizing: HSB Ex. 8.1-8.4, HEDH 3.7.10; two-phase relations: HSB Ex. 10.1, 10.3 | The whole condensing path |
-| Vertical shell-and-tube | **No** | Bell-Delaware: HEDH 3.3.9; Kern: HSB Ex. 6.1; Bell-Delaware against HSB Ex. 6.2 (differs, below); tube-side friction: HSB Ex. 6.4; condensing terms: HSB Ex. 16.2 | Eq. 16.56 combination, zone method, sizing loop, shell-side and reflux variants |
+| Plate | **No** | Coolant side and sizing: HSB Ex. 8.1-8.4; digitised approximate-design curves against HEDH 3.7.10 Ex. 1-2 readings; two-phase relations: HSB Ex. 10.1, 10.3 | The whole condensing path |
+| Vertical shell-and-tube | **No** | Bell-Delaware: HEDH 3.3.9; Kern: HSB Ex. 6.1; Bell-Delaware against HSB Ex. 6.2 (differs, below); tube-side friction: HSB Ex. 6.4; condensing terms: HSB Ex. 16.2; mechanical thickness: HEDH 4.3.6 | Eq. 16.56 combination, zone method, sizing loop, shell-side and reflux variants, vibration screen (HEDH 4.6 has no worked example) |
 | Air-cooled | **Not for vertical downflow** | HSB Ex. 9.1, 19.1, 19.2, 2.11; HEDH 3.8.9 fan problem | Gravity term of Eq. 16.56, static head, whole-tube two-phase drop |
 | Condensation library | By function | HSB Ex. 16.1-16.6, 16.13, 3.3, 10.1, 10.3, 10.5, 11.2, 19.2 | Listed function by function in `condensation_library.md` |
 
@@ -33,6 +33,9 @@ All values are computed from the inputs when `pytest` runs. No answer is stored 
 | HSB Ex. 16.13 | Silver-Bell-Ghaly area | 2778 | 2779.3 | +0.05% |
 | HSB Ex. 22.2 | Sheet length | 1.69 | 1.690 m | None |
 | HSB Ex. 22.3 | Packed bed height | 0.206 | 0.2059 m | None |
+| HEDH 4.3.6 | Shell wall | 6.31 + 3 | 6.31 + 3 mm | None |
+| HEDH 4.3.6 | Tubesheet, effective | 43.6 | 43.6 mm | None |
+| HEDH 3.7.10 Ex. 2 | Fig. 2 alpha at 33.3 kN/m2 | 9000 | 9130 W/m²K | +1.4%: book reads a rough chart value; digitised curve |
 
 ## Differences not explained by rounding
 
@@ -47,9 +50,9 @@ All values are computed from the inputs when `pytest` runs. No answer is stored 
 | HSB Ex. 6.4 | Tube-side α at Re = 8178 | 985 (Dittus-Boelter) | 875 W/m²K | The code uses Gnielinski because Re is below Dittus-Boelter's 10⁴ limit on the course sheet |
 | HSB Ex. 19.2 | Air heat balance | Stated as closed | Does not close | Book uses both 5 m/s and a 40 °C outlet, which need 18.81 and 10.72 kg/s. The module reports both closures |
 
-## Method spread that no example resolves
+## Method spread
 
-These are real engineering uncertainty, so treat the results as a range.
+These are real engineering spreads between published methods, so read the results as a range.
 
 | Case | Comparison | Result |
 |---|---|---|

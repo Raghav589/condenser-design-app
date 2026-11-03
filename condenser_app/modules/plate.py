@@ -2,8 +2,9 @@
 
 Procedure: HSB Sec. 20.2 (stepwise condensing calculation, after Kumar 1983), ME6220 Lecture 17 (sizing and rating
 steps), Lecture 14 (plate geometry, Nu, f, port loss), HSB Ch. 8 and HEDH Sec. 3.7 (single-phase plate relations).
-Plate correlations are manufacturer-specific (HSB Sec. 8.4.2, HEDH Sec. 3.7.5, Lecture 14), so their coefficients are
-labelled inputs. No worked condensing example exists in the supplied material; see docs/algorithms/plate.md.
+The plate correlation is a choice of two book fits (HSB Ex. 8.1 and 8.2, chevron; HEDH 3.7.4 and 3.7.5, intermating) or
+entered coefficients. HEDH 3.7.10C is reported as a cross-check on the coolant side. No source works a complete
+condensing plate example; see docs/algorithms/plate.md for what the benchmarks do and do not cover.
 """
 from __future__ import annotations
 
@@ -27,6 +28,7 @@ from ..schemas import (
     SinglePhaseFluidProperties,
     group,
     inp,
+    iter_inputs,
 )
 from .base import CondenserModule
 
@@ -37,22 +39,108 @@ L14 = "Lecture 14"
 L17 = "Lecture 17"
 S202 = "HSB Sec. 20.2"
 
-# Lecture 2 Table 3.1 and Lecture 13 'Geometrical and operating limits of a PHE'.
-GASKETED_T_MIN_C, GASKETED_T_MAX_C, P_MAX_BAR = -40.0, 180.0, 30.0
+# Temperature ranges: Lecture 13 'Geometrical and operating limits of a PHE'.
+GASKETED_T_MIN_C, GASKETED_T_MAX_C = -40.0, 180.0
 WELDED_T_MIN_C, WELDED_T_MAX_C = -200.0, 260.0
+# Pressure: 2000 kN/m2 gasketed (HEDH 3.7.10A and 4.4.2 Table 4, inside HSB Table 4.1's 1.6 to 2.5 MPa);
+# 3.0 MPa welded (HSB Table 4.1), 30 bar welded and brazed (Lecture 13).
+P_MAX_GASKETED_BAR, P_MAX_WELDED_BAR = 20.0, 30.0
 P_MIN_BAR = 1.0
 MAX_PLATES = 700
 MAX_LIQUID_PORT_VELOCITY = 5.0  # m/s, Lecture 13
-GASKET_T_MAX_C = {  # Lecture 13, 'Materials for PHE gaskets'
-    "acrylonitrile-butadiene": 135.0,
-    "isobutylene-isoprene": 150.0,
-    "viton": 175.0,
-    "ethylene propylene rubber": 150.0,
-}
 # Enhancement relative to the 30 degree plate, as read in HSB Example 8.4 from Figs. 8.9 and 8.10.
 HSB_CHEVRON_FACTORS = {45.0: (1.4, 3.0), 60.0: (2.0, 10.0)}
 # Water at 313 K, the reference fluid of the approximate-design curves (HEDH Sec. 3.7.10C; Lecture 16 Step 2).
 REFERENCE_WATER = {"rho": 1000.0, "cp": 4200.0, "k": 0.63, "mu": 0.65e-3}
+HEDH_APPROX_MU_MAX = 4e-3  # kg/m.s, HEDH 3.7.10C
+
+# --------------------------------------------------------------------------- book plate correlations
+PRESET_HSB = "HSB chevron, Ex. 8.1 and 8.2"
+PRESET_HEDH = "HEDH intermating, turbulent"
+PRESET_ENTERED = "entered coefficients"
+CORRELATION_PRESETS = (PRESET_HSB, PRESET_HEDH, PRESET_ENTERED)
+
+
+@dataclass(frozen=True)
+class PlateCoefficients:
+    """Nu = C_h Re^y Pr^n (mu/mu_w)^m and f = K_p Re^-z, with f the Fanning-type factor of dP = 4 f (L/De)(G^2/2 rho)."""
+
+    name: str
+    C_h: float
+    y: float
+    n_pr: float
+    K_p: float
+    z: float
+    re_min: float
+    re_max: float | None  # right-hand end of the plotted Re axis, None for entered coefficients
+    m_visc: float | None
+    bases: tuple[str, ...]  # area bases on which the source states its De
+    enhancement_h: float = 1.0
+    enhancement_f: float = 1.0
+
+
+# Re limits. HSB chevron: the fit is for the turbulent region, and HEDH 3.7.4 puts the chevron transition at Re 10 to 150.
+# HEDH intermating: all plates are fully turbulent above 1000 (HEDH 3.7.4). Both figures stop at Re = 10000.
+# m = 0.1: the ordinate of HSB Figs. 8.7, 8.8 and HEDH 3.7.4 Figs. 1, 2 is Nu/[Pr^0.4 (eta/eta_w)^0.1].
+# Bases. HSB Eq. 8.7: De = 2b, projected. HEDH 3.7.3 Eq. 2: d_e = 2b/r, with HEDH 3.7.5 allowing gap = d_e/2 for budget work.
+BOOK_COEFFICIENTS = {
+    PRESET_HSB: PlateCoefficients(PRESET_HSB, 0.4, 0.64, 0.4, 2.78, 0.18, 150.0, 1e4, 0.1, ("projected",)),
+    PRESET_HEDH: PlateCoefficients(PRESET_HEDH, 0.2, 0.67, 0.4, 1.22, 0.252, 1000.0, 1e4, 0.1, ("developed", "projected")),
+}
+COEFFICIENT_FIELDS = ("C_h", "y", "n_pr", "K_p", "z", "re_min")
+
+# --------------------------------------------------------------------------- HEDH 3.7.10C curves
+# Digitised by pixel tracing against the axis ticks, corrected for scan skew, on the HEDH page and independently on the
+# Lecture 16 reproduction; the two traces agree within 0.5%. All three charts are log-log, water at 313 K, unit flow ratio.
+# Fig. 1: total flow V (m3/s), plate area a (m2). Read uncertainty +/-1.5%, +/-3% below a = 0.2 m2.
+FIG1_AREA_FLOW = (
+    (0.0029, 0.154), (0.003, 0.157), (0.005, 0.204), (0.0088, 0.271), (0.01, 0.289), (0.02, 0.411),
+    (0.05, 0.65), (0.1, 0.92), (0.2, 1.31), (0.3, 1.61), (0.5, 2.09), (0.55, 2.20),
+)
+# Fig. 2: pressure drop per pass (kN/m2), alpha = 2U (W/m2.K). Read uncertainty +/-1%.
+FIG2_ALPHA_DP = ((10.0, 6380.0), (15.0, 7200.0), (20.0, 7850.0), (30.0, 8850.0), (50.0, 10300.0), (70.0, 11400.0), (100.0, 12680.0), (130.0, 13715.0), (165.0, 14800.0))
+# Fig. 3: pressure drop per pass (kN/m2), plate flow q (1e-3 m3/s) for each plate area (m2). Read uncertainty +/-1.5%.
+FIG3_DP = (10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 70.0, 100.0, 120.0)
+FIG3_PLATE_FLOW = {
+    0.1: (0.286, 0.361, 0.427, 0.539, 0.637, 0.724, 0.879, 1.080, 1.201),
+    0.25: (0.372, 0.471, 0.557, 0.706, 0.836, 0.952, 1.159, 1.427, 1.588),
+    0.5: (0.443, 0.560, 0.661, 0.835, 0.985, 1.121, 1.360, 1.671, 1.856),
+    1.0: (0.499, 0.634, 0.750, 0.952, 1.127, 1.284, 1.565, 1.929, 2.147),
+    2.0: (0.555, 0.706, 0.838, 1.066, 1.266, 1.445, 1.766, 2.183, 2.434),
+}
+
+# --------------------------------------------------------------------------- HEDH 4.4.2 Table 2, gaskets
+AQUEOUS, DILUTE_ACID, STRONG_ACID, OXIDIZER = "aqueous liquid", "dilute acid", "strong acid", "strong oxidizing solution"
+MINERAL_ACID, INORGANIC_ACID, ORGANIC_ACID = "concentrated mineral acid", "inorganic acid", "organic acid"
+FAT_OIL, ALDEHYDE, KETONE, ESTER = "fat or mineral oil", "aldehyde", "ketone", "ester"
+AROMATIC, CHLORINATED, POLAR, OTHER_ORGANIC = "aromatic hydrocarbon", "low-molecular-weight chlorinated hydrocarbon", "polar organic solvent", "other organic liquid"
+FLUID_CLASSES = (AQUEOUS, DILUTE_ACID, STRONG_ACID, OXIDIZER, MINERAL_ACID, INORGANIC_ACID, ORGANIC_ACID, FAT_OIL, ALDEHYDE, KETONE, ESTER, AROMATIC, CHLORINATED, POLAR, OTHER_ORGANIC)
+ORGANIC_LIQUIDS = (ALDEHYDE, KETONE, ESTER, AROMATIC, CHLORINATED, POLAR, OTHER_ORGANIC)
+
+
+@dataclass(frozen=True)
+class GasketMaterial:
+    t_max_c: float | None
+    suitable_text: str
+    unsuitable_text: str
+    suitable: tuple[str, ...]
+    unsuitable: tuple[str, ...]
+
+
+# The *_text fields are HEDH's wording. The class tuples only sort that wording onto FLUID_CLASSES. 'Many organic liquids'
+# is taken as unsuitable for every organic class. A class the row does not name stays unlisted.
+_BUTYL_SUITABLE = (ALDEHYDE, KETONE, OTHER_ORGANIC, INORGANIC_ACID, ORGANIC_ACID)
+_BUTYL_UNSUITABLE = (FAT_OIL, AROMATIC, MINERAL_ACID)
+GASKETS = {
+    "styrene-butadiene (SBR)": GasketMaterial(87.0, "General-purpose rubber for a wide range of aqueous solutions, dilute acids, etc.", "Strong acids and many organic liquids", (AQUEOUS, DILUTE_ACID), (STRONG_ACID,) + ORGANIC_LIQUIDS),
+    "acrylonitrile-butadiene (nitrile)": GasketMaterial(137.0, "Aqueous liquids, dilute acids, fats, and mineral oils", "Strong oxidizing solutions, strong acids, polar organic solvents", (AQUEOUS, DILUTE_ACID, FAT_OIL), (OXIDIZER, STRONG_ACID, POLAR)),
+    "isobutylene-isoprene (butyl)": GasketMaterial(152.0, "Organic liquids, such as aldehydes, ketones, inorganic acids, and organic acids", "Fats, oils, aromatic hydrocarbons, and concentrated mineral acids", _BUTYL_SUITABLE, _BUTYL_UNSUITABLE),
+    "ethylene-propylene (EPDM)": GasketMaterial(152.0, "Similar chemical resistance to butyl but frequently superior", "Fats, oils, aromatic hydrocarbons, and concentrated mineral acids", _BUTYL_SUITABLE, _BUTYL_UNSUITABLE),
+    "fluorocarbon (Viton)": GasketMaterial(177.0, "A wide range of organic liquids; fats and oils (at high temperatures) and some mineral acids", "Esters, ketones", (OTHER_ORGANIC, FAT_OIL), (ESTER, KETONE)),
+    "silicone": GasketMaterial(None, "Specific chemical duties and low-temperature applications", "Many organic liquids", (), ORGANIC_LIQUIDS),
+    "compressed asbestos fibre": GasketMaterial(250.0, "Organic solvents that attack all grades of rubber (e.g., esters, benzene, and low-molecular-weight chlorinated hydrocarbons)", "None listed", (ESTER, AROMATIC, CHLORINATED), ()),
+}
+LECTURE_13_GASKET_T_MAX_C = {"acrylonitrile-butadiene (nitrile)": 135.0, "isobutylene-isoprene (butyl)": 150.0, "fluorocarbon (Viton)": 175.0, "ethylene-propylene (EPDM)": 150.0}
 
 
 # --------------------------------------------------------------------------------------------- inputs
@@ -65,27 +153,28 @@ class PlateGeometry:
     k_plate: float | None = inp("Plate thermal conductivity", "W/m.K", minimum=0, exclusive_minimum=True, help="Lecture 13 table at 100 degC: stainless 316 17, titanium 20, Hastelloy C-276 11.", source="Lecture 13")
     port_d: float | None = inp("Port diameter", "m", display_unit="mm", minimum=0, exclusive_minimum=True, help="Used for the coolant and condensate ports, and the vapour port unless given below.", source="Lecture 14")
     port_d_vapour: float | None = inp("Vapour port diameter", "m", display_unit="mm", minimum=0, exclusive_minimum=True, required=False, help="Optional. Lecture 23: the vapour port is usually larger than the liquid ports. A non-circular port is not treated; enter an equivalent diameter.", source="Lecture 23")
-    area_basis: str | None = inp("Area basis of the correlation", choices=("projected", "developed"), default="projected", help="Must match the basis on which the Nu and f data were reduced. Projected: De = 2b, A = NLW. Developed: De = 2b/phi, A = NLW phi.", source="HSB Eqs. 8.7, 8.8; Lecture 17 Steps 3, 6")
-    phi: float | None = inp("Enlargement factor phi", minimum=1, required=False, help="Developed length / projected length. Required on the developed basis. Lecture 14: 1.1 to 1.25, average 1.17.", source="Lecture 14")
+    area_basis: str | None = inp("Area basis of the correlation", choices=("projected", "developed"), default="projected", help="Must match the basis on which the Nu and f data were reduced. Projected: De = 2b, A = NLW. Developed: De = 2b/phi, A = NLW phi. HSB's chevron fit is projected (Eq. 8.7).", source="HSB Eqs. 8.7, 8.8; HEDH 3.7.3; Lecture 17 Steps 3, 6")
+    phi: float | None = inp("Enlargement factor phi", minimum=1, required=False, help="Developed length / projected length. Required on the developed basis. Lecture 14: 1.1 to 1.25, average 1.17. HEDH 3.7.7: 1.15 to 1.25.", source="Lecture 14; HEDH 3.7.7")
     chevron_angle: float | None = inp("Chevron angle beta", "deg", minimum=0, maximum=90, required=False, help="Optional, for the record and the check on the coefficients. It enters the calculation only through the coefficients and enhancement factors below.", source="HSB Figs. 8.9, 8.10")
-    construction: str | None = inp("Construction", choices=("gasketed", "brazed or welded"), default="gasketed", source="Lecture 2 Table 3.1; Lecture 13")
-    gasket_material: str | None = inp("Gasket material", choices=tuple(GASKET_T_MAX_C), required=False, help="Optional. Sets the gasket temperature check.", source="Lecture 13")
+    construction: str | None = inp("Construction", choices=("gasketed", "brazed or welded"), default="gasketed", source="Lecture 13; HSB Table 4.1")
+    gasket_material: str | None = inp("Gasket material", choices=tuple(GASKETS), required=False, help="Optional. Sets the gasket temperature and compatibility checks, from HEDH 4.4.2 Table 2.", source="HEDH 4.4.2 Table 2")
 
 
 @dataclass
 class PlateCorrelation:
-    """Nu = C_h Re^y Pr^n (mu/mu_w)^m and f = K_p Re^-z. Every coefficient is specific to one plate."""
+    """Nu = C_h Re^y Pr^n (mu/mu_w)^m and f = K_p Re^-z. A book fit, or coefficients for one particular plate."""
 
-    correlation_name: str | None = inp("Plate correlation source name", required=False, default="", help="Say where the coefficients come from: a manufacturer's data sheet, or the indicative fit used.")
-    C_h: float | None = inp("Nusselt coefficient C_h", minimum=0, exclusive_minimum=True, help="Manufacturer-specific. Indicative values only in the sources: 0.4 (HSB Ex. 8.1, fit to the small chevron plate of Fig. 8.8, similar to beta = 30 deg); 0.2 (HEDH 3.7.5, small intermating plate).", source="HSB Sec. 8.4.2; HEDH 3.7.5; Lecture 14")
-    y: float | None = inp("Reynolds exponent y", minimum=0, exclusive_minimum=True, maximum=1, help="Indicative: 0.64 (HSB chevron fit); 0.67 (HEDH intermating).", source="HSB Ex. 8.1; HEDH 3.7.5")
-    n_pr: float | None = inp("Prandtl exponent n", minimum=0, exclusive_minimum=True, help="0.4 in HSB and HEDH; 1/3 in Lecture 14.", source="HSB Ex. 8.1; Lecture 14")
-    K_p: float | None = inp("Friction coefficient K_p", minimum=0, exclusive_minimum=True, help="Fanning-type f in dP = 4 f (L/De)(G^2/2 rho). Indicative: 2.78 (HSB chevron fit); 1.22 (HEDH intermating).", source="HSB Ex. 8.2; HEDH 3.7.4; Lecture 14")
-    z: float | None = inp("Friction exponent z", minimum=0, maximum=1.5, help="f = K_p Re^-z. Indicative: 0.18 (HSB chevron fit); 0.252 (HEDH intermating).", source="HSB Ex. 8.2; HEDH 3.7.4")
-    re_min: float | None = inp("Lowest Reynolds number of the correlation", minimum=0, exclusive_minimum=True, help="The HSB and HEDH fits are for the turbulent region. HEDH 3.7.4: small chevron plate transition 10 to 150; all plates fully turbulent above 1000.", source="HEDH 3.7.4")
+    correlation_preset: str | None = inp("Plate correlation", choices=CORRELATION_PRESETS, default=PRESET_HSB, help="HSB chevron: Nu = 0.4 Pr^0.4 Re^0.64, f = 2.78 Re^-0.18, a fit to the small chevron plate of Fig. 8.8, similar to beta = 30 deg. HEDH intermating: Nu = 0.2 Re^0.67 Pr^0.4 (eta/eta_w)^0.1, f = 1.22 Re^-0.252. Entered: type the coefficients of your plate.", source="HSB Ex. 8.1, 8.2; HEDH 3.7.4, 3.7.5")
+    correlation_name: str | None = inp("Source of the entered coefficients", required=False, default="", help="Say where the coefficients come from, such as a manufacturer's data sheet.")
+    C_h: float | None = inp("Nusselt coefficient C_h", minimum=0, exclusive_minimum=True, required=False, help="Entered coefficients only.", source="Lecture 14")
+    y: float | None = inp("Reynolds exponent y", minimum=0, exclusive_minimum=True, maximum=1, required=False, help="Entered coefficients only.", source="Lecture 14")
+    n_pr: float | None = inp("Prandtl exponent n", minimum=0, exclusive_minimum=True, required=False, help="Entered coefficients only. 0.4 in HSB and HEDH; 1/3 in Lecture 14.", source="HSB Ex. 8.1; Lecture 14")
+    K_p: float | None = inp("Friction coefficient K_p", minimum=0, exclusive_minimum=True, required=False, help="Entered coefficients only. Fanning-type f in dP = 4 f (L/De)(G^2/2 rho).", source="HSB Ex. 8.2; Lecture 14")
+    z: float | None = inp("Friction exponent z", minimum=0, maximum=1.5, required=False, help="Entered coefficients only. f = K_p Re^-z.", source="Lecture 14")
+    re_min: float | None = inp("Lowest Reynolds number of the correlation", minimum=0, exclusive_minimum=True, required=False, help="Entered coefficients only. HEDH 3.7.4: small chevron plate transition 10 to 150; all plates fully turbulent above 1000.", source="HEDH 3.7.4")
     enhancement_h: float | None = inp("Heat transfer enhancement factor", minimum=0, exclusive_minimum=True, default=1.0, help="Multiplies h when the coefficients are for another chevron angle. HSB Ex. 8.4, from Fig. 8.9: 1.4 at 45 deg, 2 at 60 deg, relative to 30 deg. Leave 1 if the coefficients already apply.", source="HSB Ex. 8.4")
     enhancement_f: float | None = inp("Friction enhancement factor", minimum=0, exclusive_minimum=True, default=1.0, help="Multiplies f. HSB Ex. 8.4, from Fig. 8.10: 3 at 45 deg, 10 at 60 deg, relative to 30 deg.", source="HSB Ex. 8.4")
-    m_visc: float | None = inp("Viscosity-ratio exponent m", minimum=0, required=False, help="Needed only with a wall viscosity. 0.1 in HEDH 3.7.5, 0.17 in Lecture 14.", source="HEDH 3.7.5; Lecture 14")
+    m_visc: float | None = inp("Viscosity-ratio exponent m", minimum=0, required=False, help="Entered coefficients only, and needed only with a wall viscosity. The book fits use 0.1 (HEDH 3.7.5); Lecture 14 uses 0.17.", source="HEDH 3.7.5; Lecture 14")
 
 
 @dataclass
@@ -96,6 +185,7 @@ class CondensingStream:
     pressure: float | None = inp("Condensing pressure", "Pa", display_unit="bar", minimum=0, exclusive_minimum=True, help="Saturation pressure at T_sat. Used for the pressure limits and the pressure-drop feedback check.", source=L17)
     vapour_entry: str | None = inp("Vapour entry", choices=("single", "double"), default="single", help="Double: fed from both ends of the pack (HSB Fig. 20.3), so each port carries half the vapour. It costs more pipework.", source="HSB Fig. 20.3")
     flammable_or_toxic: str | None = inp("Flammable or toxic fluid?", choices=("yes", "no"), required=False, help="Optional. Gaskets may leak (HSB Secs. 8.2, 17.2).", source="HSB Sec. 17.2")
+    fluid_class: str | None = inp("Condensing fluid class", choices=FLUID_CLASSES, required=False, help="Optional. Sets the gasket compatibility check against HEDH 4.4.2 Table 2. Steam and its condensate are an aqueous liquid. Use the class of the condensate.", source="HEDH 4.4.2 Table 2")
 
 
 @dataclass
@@ -119,7 +209,7 @@ class SolverOptions:
 @dataclass
 class PlateInputs:
     geometry: PlateGeometry = group("Plate geometry", PlateGeometry)
-    correlation: PlateCorrelation = group("Plate correlation (manufacturer-specific: enter labelled coefficients)", PlateCorrelation)
+    correlation: PlateCorrelation = group("Plate correlation", PlateCorrelation)
     condensing: CondensingFluidProperties = group("Condensing fluid, saturated properties", CondensingFluidProperties)
     vapour: CondensingStream = group("Condensing stream", CondensingStream)
     coolant_props: SinglePhaseFluidProperties = group("Coolant properties at its mean temperature", SinglePhaseFluidProperties)
@@ -130,6 +220,15 @@ class PlateInputs:
 
 
 # ------------------------------------------------------------------------------- plate relations
+def plate_coefficients(k: PlateCorrelation) -> PlateCoefficients:
+    """The coefficients in force: a book fit from its preset, or the entered values. Enhancement factors apply to either."""
+    if k.correlation_preset == PRESET_ENTERED:
+        name = k.correlation_name or "entered coefficients, source not named"
+        return PlateCoefficients(name, k.C_h, k.y, k.n_pr, k.K_p, k.z, k.re_min, None, k.m_visc, ("projected", "developed"), k.enhancement_h, k.enhancement_f)
+    book = BOOK_COEFFICIENTS[k.correlation_preset]
+    return PlateCoefficients(book.name, book.C_h, book.y, book.n_pr, book.K_p, book.z, book.re_min, book.re_max, book.m_visc, book.bases, k.enhancement_h, k.enhancement_f)
+
+
 def equivalent_diameter(b: float, phi: float | None = None, basis: str = "projected") -> float:
     """De = 2b (projected) or 2b/phi (developed). HSB Eqs. 8.7, 8.8; Lecture 14, for b << w."""
     return 2.0 * b if basis == "projected" else 2.0 * b / phi
@@ -219,6 +318,66 @@ def property_correction_factors(rho: float, cp: float, k: float, mu: float) -> t
     return psi, phi_dp
 
 
+def _log_interp(x: float, xs: tuple[float, ...], ys: tuple[float, ...]) -> float:
+    """Straight-line interpolation in log-log space. The end segments extend past the table; callers check the range."""
+    i = 0
+    while i < len(xs) - 2 and x > xs[i + 1]:
+        i += 1
+    t = (math.log(x) - math.log(xs[i])) / (math.log(xs[i + 1]) - math.log(xs[i]))
+    return math.exp(math.log(ys[i]) + t * (math.log(ys[i + 1]) - math.log(ys[i])))
+
+
+def plate_area_from_flow(v_dot: float) -> float:
+    """Plate area a (m2) for a total flow V (m3/s). HEDH 3.7.10 Fig. 1; Lecture 16."""
+    return _log_interp(v_dot, *zip(*FIG1_AREA_FLOW))
+
+
+def alpha_from_dp(dp_kpa: float) -> float:
+    """alpha = 2U (W/m2.K) of water at 313 K for a pressure drop per pass (kN/m2). HEDH 3.7.10 Fig. 2; Lecture 16."""
+    return _log_interp(dp_kpa, *zip(*FIG2_ALPHA_DP))
+
+
+def plate_flow_from_dp(dp_kpa: float, area: float) -> float:
+    """Plate flow q (m3/s) of water at 313 K for a pressure drop per pass (kN/m2). HEDH 3.7.10 Fig. 3; Lecture 16.
+
+    Log-log along each drawn curve for dP, then log-log between the curves for the plate area.
+    """
+    areas = tuple(FIG3_PLATE_FLOW)
+    flows = tuple(_log_interp(dp_kpa, FIG3_DP, FIG3_PLATE_FLOW[a]) for a in areas)
+    return 1e-3 * _log_interp(area, areas, flows)
+
+
+@dataclass
+class ApproximateSide:
+    """One liquid side of the approximate design, HEDH 3.7.10C steps 2 to 5."""
+
+    psi: float
+    phi_dp: float
+    dp_water: float  # kN/m2, the pressure drop to read on the water curves
+    alpha: float     # W/m2.K, already shifted by psi
+    q: float         # m3/s per plate
+
+
+def approximate_side(dp_pass_kpa: float, area: float, rho: float, cp: float, k: float, mu: float) -> ApproximateSide:
+    """alpha = psi Fig. 2(dP/phi_dP); q = Fig. 3(dP/phi_dP, a). HEDH factors the Delta-p ordinates by phi_dP, so a duty dP reads at dP/phi_dP."""
+    psi, phi_dp = property_correction_factors(rho, cp, k, mu)
+    dp_water = dp_pass_kpa / phi_dp
+    return ApproximateSide(psi, phi_dp, dp_water, psi * alpha_from_dp(dp_water), plate_flow_from_dp(dp_water, area))
+
+
+def approximate_plate_count(passes: float, v_dot: float, q: float) -> float:
+    """n = 2 H V / q. HEDH 3.7.10C step 5(e); Lecture 16 Step 9."""
+    return 2.0 * passes * v_dot / q
+
+
+def gasket_compatibility(material: str, fluid_class: str) -> bool | None:
+    """True if HEDH 4.4.2 Table 2 lists the class as suitable for the rubber, False if unsuitable, None if the row names neither."""
+    gasket = GASKETS[material]
+    if fluid_class in gasket.unsuitable:
+        return False
+    return True if fluid_class in gasket.suitable else None
+
+
 def smallest_plate_count(required_plates, *, start: float, snap, name: str, max_iter: int = 60, tol: float = 0.5):
     """Iterate N = snap(required_plates(N)) from below. Returns (N, ConvergenceInfo).
 
@@ -240,7 +399,7 @@ def phase_gradient(G_phase: float, rho: float, mu: float, de: float, k_p: float,
 def chisholm_c(re_l: float, re_g: float, re_transition: float) -> float:
     """C of HSB Eq. 10.43. A phase counts as turbulent at or above the plate's turbulent limit.
 
-    HSB's table is for tubes; using the plate transition as its boundary is this module's assumption.
+    HSB's table is for tubes; this module uses the plate transition as its boundary.
     """
     turb_l, turb_g = re_l >= re_transition, re_g >= re_transition
     if turb_l and turb_g:
@@ -420,7 +579,7 @@ def _duty(i: PlateInputs) -> _Duty:
 
 def _evaluate(i: PlateInputs, d: _Duty, N: int) -> _Evaluation:
     """Everything that depends on the plate count, for one N: Sec. 20.2.2 steps 2 and 3, with the quality range fixed."""
-    g, k, p, cool = i.geometry, i.correlation, i.condensing, i.coolant_props
+    g, k, p, cool = i.geometry, plate_coefficients(i.correlation), i.condensing, i.coolant_props
     passes = _as_int(i.coolant.passes)
     de = equivalent_diameter(g.b, g.phi, g.area_basis)
     a_plate = plate_area(g.L, g.W, g.phi, g.area_basis)
@@ -482,7 +641,7 @@ def _evaluate(i: PlateInputs, d: _Duty, N: int) -> _Evaluation:
 
 def _hydraulics(i: PlateInputs, d: _Duty, ev: _Evaluation) -> _Hydraulics:
     """Sec. 20.2.1 for the vapour; Lecture 14 and HSB Sec. 8.4.4 for the coolant. Fills the zone lengths."""
-    g, k, p, cool = i.geometry, i.correlation, i.condensing, i.coolant_props
+    g, k, p, cool = i.geometry, plate_coefficients(i.correlation), i.condensing, i.coolant_props
     passes = _as_int(i.coolant.passes)
     k_f = k.K_p * k.enhancement_f
 
@@ -529,14 +688,14 @@ class PlateModule(CondenserModule):
     input_class = PlateInputs
 
     def example_inputs(self) -> PlateInputs:
-        # Illustrative duty, not a textbook case: no source works a condensing plate example. Steam heating water is the
-        # application HSB Sec. 20.2 calls favourable. Plate: HSB Ex. 8.1. Steam: HSB Table II.1, 373.15 K. Water: HSB
-        # Ex. 8.1, 55 degC. Coefficients: HSB Ex. 8.1 and 8.2 (indicative fit to Fig. 8.8). Stainless 316: Lecture 13.
+        # Illustrative duty, not a book case: no source works a complete condensing plate example. Steam heating water
+        # is the application HSB Sec. 20.2 calls favourable. Plate: HSB Ex. 8.1. Steam: HSB Table II.1, 373.15 K. Water: HSB
+        # Ex. 8.1, 55 degC. Correlation: the HSB chevron preset. Stainless 316: Lecture 13. Nitrile for an aqueous fluid: HEDH 4.4.2 Table 2.
         return PlateInputs(
-            geometry=PlateGeometry(L=1.0, W=0.25, b=0.005, t=0.6e-3, k_plate=17.0, port_d=0.1, port_d_vapour=0.15, area_basis="projected", phi=1.17, chevron_angle=30.0, construction="gasketed", gasket_material="ethylene propylene rubber"),
-            correlation=PlateCorrelation(correlation_name="HSB Ex. 8.1 and 8.2 fit to Fig. 8.8, small chevron plate (indicative)", C_h=0.4, y=0.64, n_pr=0.4, K_p=2.78, z=0.18, re_min=150.0, enhancement_h=1.0, enhancement_f=1.0),
+            geometry=PlateGeometry(L=1.0, W=0.25, b=0.005, t=0.6e-3, k_plate=17.0, port_d=0.1, port_d_vapour=0.15, area_basis="projected", phi=1.17, chevron_angle=30.0, construction="gasketed", gasket_material="acrylonitrile-butadiene (nitrile)"),
+            correlation=PlateCorrelation(correlation_preset=PRESET_HSB, enhancement_h=1.0, enhancement_f=1.0),
             condensing=CondensingFluidProperties(name="steam", T_sat=100.0, h_fg=2256.7e3, rho_l=958.3, rho_v=0.597, mu_l=277.53e-6, mu_v=12.55e-6, k_l=0.679, cp_l=4220.0, sigma=58.91e-3),
-            vapour=CondensingStream(m_dot=0.1, x_in=1.0, x_out=0.0, pressure=101.3e3, vapour_entry="single", flammable_or_toxic="no"),
+            vapour=CondensingStream(m_dot=0.1, x_in=1.0, x_out=0.0, pressure=101.3e3, vapour_entry="single", flammable_or_toxic="no", fluid_class=AQUEOUS),
             coolant_props=SinglePhaseFluidProperties(name="water at 55 degC", rho=985.2, cp=4183.0, mu=5.05e-4, k=0.648),
             coolant=CoolantStream(T_in=30.0, T_out=80.0, passes=1, direction="countercurrent"),
             fouling=FoulingFactors(R_f_condensing=0.0, R_f_coolant=0.0),
@@ -544,9 +703,21 @@ class PlateModule(CondenserModule):
             solver=SolverOptions(n_zones=20, max_iterations=60),
         )
 
+    def relevant_fields(self, inputs: PlateInputs) -> set[str]:
+        """The typed coefficients show only when 'entered coefficients' is chosen."""
+        shown = {path for path, *_ in iter_inputs(inputs)}
+        if inputs.correlation.correlation_preset == PRESET_ENTERED:
+            return shown
+        return shown - {f"correlation.{name}" for name in COEFFICIENT_FIELDS + ("correlation_name", "m_visc")}
+
     def validate(self, inputs: PlateInputs) -> list[InputIssue]:
         i, issues = inputs, []
         c, s, v, g, k = i.condensing, i.coolant, i.vapour, i.geometry, i.correlation
+        entered = k.correlation_preset == PRESET_ENTERED
+        if entered:
+            for name in COEFFICIENT_FIELDS:
+                if getattr(k, name) is None:
+                    issues.append(InputIssue(f"correlation.{name}", "Entered coefficients need this value, or choose one of the book correlations."))
         if v.x_in <= v.x_out:
             issues.append(InputIssue("vapour.x_out", "The outlet quality must be below the inlet quality for a condensing duty."))
         if s.T_in >= c.T_sat:
@@ -575,7 +746,7 @@ class PlateModule(CondenserModule):
             issues.append(InputIssue("geometry.phi", "The developed-area basis needs the enlargement factor (Lecture 17 Steps 3, 6)."))
         if g.b >= g.W:
             issues.append(InputIssue("geometry.b", "De = 2b assumes b << w (Lecture 14); the gap must be well below the width."))
-        if s.mu_wall is not None and k.m_visc is None:
+        if entered and s.mu_wall is not None and k.m_visc is None:
             issues.append(InputIssue("correlation.m_visc", "A wall viscosity needs the viscosity-ratio exponent m of the correlation."))
         return issues
 
@@ -611,7 +782,7 @@ class PlateModule(CondenserModule):
         r.convergence.append(info)
         N = _as_int(N)
         N_thermal = N
-        r.assumptions.append(
+        r.design_basis.append(
             f"Why it iterates: the channel velocities, h on both sides and so the required area all depend on N (Lecture 17 sizing Steps 5-10). First guess N = {start}, the "
             "smallest allowed count, because the required area rises more slowly with N than the area provided, so climbing from below stops at the smallest N that meets the duty. "
             "Update: N(next) = A_required(N)/a, rounded up to an allowed count (odd, so both streams get (N + 1)/2 channels, HSB Sec. 8.6.2.1, and a multiple of the coolant passes). "
@@ -628,6 +799,7 @@ class PlateModule(CondenserModule):
         self._zone_table(ev, r)
         self._outputs(i, d, ev, hy, r, limited_by)
         self._checks(i, d, ev, hy, r)
+        self._approximate_design(i, d, ev, hy, r)
         return r
 
     # ------------------------------------------------------------------------------- iteration 2
@@ -656,8 +828,8 @@ class PlateModule(CondenserModule):
             r.warnings.append("More plates cannot meet the pressure drop, because the port loss does not depend on N: " + "; ".join(unreachable) + ". Use a larger port (HSB Sec. 20.2 lists this), or double vapour entry (Fig. 20.3).")
             return N, "duty"
 
-        exponent = 2.0 - i.correlation.z
-        cap = _snap_plates(MAX_PLATES - 2 * passes, passes)  # largest allowed count not above the Lecture 13 limit
+        exponent = 2.0 - plate_coefficients(i.correlation).z
+        cap =_snap_plates(MAX_PLATES - 2 * passes, passes)  # largest allowed count not above the Lecture 13 limit
 
         def channel_excess(hy: _Hydraulics) -> float:
             """Ratio of the N-dependent drop to what the allowable leaves for it. Port and static parts do not fall with N."""
@@ -711,7 +883,7 @@ class PlateModule(CondenserModule):
         r.convergence.append(info)
         if stopped["at_max"]:
             r.warnings.append(f"The allowable pressure drop is still exceeded at the {MAX_PLATES}-plate limit of Lecture 13. Use a larger plate, or reduce the chevron angle (HSB Ex. 8.4).")
-        r.assumptions.append(
+        r.design_basis.append(
             "The unit is pressure-drop limited, so plates were added beyond the thermal count and the excess area accepted (HSB Ex. 8.4). "
             "Update: N(next) = N (dP_channel/room)^(1/(2 - z)), from dP ~ u^(2 - z), where room is the allowable less the parts that do not fall with N, rounded up to an allowed count. Stop: every total within its allowable, then step back while the limits still hold."
         )
@@ -720,28 +892,29 @@ class PlateModule(CondenserModule):
     # ------------------------------------------------------------------------------------- notes
     @staticmethod
     def _notes(i: PlateInputs, r: DesignResult) -> None:
-        name = i.correlation.correlation_name or "not named by the user"
-        r.assumptions += [
-            f"Plate correlation coefficients are inputs ({name}). The sources say plainly that plate data are proprietary to manufacturers (HSB Sec. 8.4.2), that correlations apply only to the plates tested (Lecture 14), and that the published equations are typical and only for approximate surface area (HEDH Sec. 3.7.5). The result is only as good as these coefficients; a manufacturer's rating is needed for a real unit (HEDH Sec. 3.7.12).",
-            "The same plate correlation is used on both sides: the condensing coefficient is the liquid single-phase value at the Akers effective mass flux (HSB Sec. 20.2.2). The method is reported by HSB from Kumar (1983) as 'typical'; Akers et al. (1959) developed it for horizontal tubes. No data in the supplied material validates it on plates.",
+        k = plate_coefficients(i.correlation)
+        r.design_basis += [
+            f"Plate correlation: {k.name}. The HSB chevron fit is the default because HSB Sec. 8.4.1 calls chevrons the more commonly used corrugation and works its plate examples with this fit. Plate data are proprietary to manufacturers (HSB Sec. 8.4.2), correlations apply only to the plates tested (Lecture 14), and the book equations are typical and fit for approximate surface area (HEDH Sec. 3.7.5). The result is a coursework sizing; a real unit needs the manufacturer's rating (HEDH Sec. 3.7.12).",
+            "The f of both book fits and of the entered form is the same Fanning-type factor: HSB's dP = 4 f (L/De)(rho u^2/2) and HEDH's dP = 2 f L G^2/(rho d_e) are one equation.",
+            "The same plate correlation is used on both sides: the condensing coefficient is the liquid single-phase value at the Akers effective mass flux (HSB Sec. 20.2.2). HSB reports the method from Kumar (1983) as 'typical'; Akers et al. (1959) developed it for horizontal tubes. HSB and HEDH give no plate condensing data to test it against.",
             "Isothermal condensation at T_sat of a single pure component: the feedback of pressure drop on T_sat that HSB Sec. 20.2.2 describes is not iterated, and is reported as a check instead.",
             "Coolant properties are constant at its mean temperature, (T_in + T_out)/2 (Lecture 17 sizing Step 4). The user enters them for that temperature; the module cannot verify this.",
             "Flow is split equally among the channels of each stream and the vapour side has one pass, in downflow (HSB Fig. 20.1; Lecture 15 assumptions). The condensate viscosity ratio is taken as 1, as is the coolant's unless a wall viscosity is given.",
             "Any excess area is shared in proportion among the zones, so the zones fill the plate length for the pressure drop. HEDH Sec. 3.7.12 warns that a plate may in fact condense over only a fraction of its length when the available pressure drop is very low.",
         ]
-        r.source_gaps += [
-            "The project's supplied plate procedure, numerical examples, data sheets and Prof. Das's textbook are not available. Lecture 17 cites its Eqs. 7.15, 7.16, Table 7.5, Table 7.6, Figs. 7.18-7.21 and worked Example 7.3, none of which is in the folder. Replace or confirm this module when the project drive is added.",
-            "No source works a condensing plate example. The benchmarks are single-phase examples of the coolant-side and sizing path (HSB Ex. 8.1-8.4, HEDH 3.7.10). The condensing path is tested only by limits, closure and trends.",
-            "HSB Eq. 20.7 as printed gives G_Le -> 0 as x -> 0 (it reduces to 2xG for constant f) and contradicts its own text, G_Le = G(1 - x) + G_e. The text and Eq. 20.6 are used instead. Eq. 20.6 with each phase's actual flow in the bracket counts the density ratio twice and diverges as x -> 1, so the bracket is taken at a common mass flux: (mu_G/mu_L)^z. This reading should be confirmed against Kumar (1983) or Akers et al. (1959), which are not in the folder.",
+        r.scope_limits += [
+            "No source works a complete condensing plate example. The benchmarks are single-phase examples of the coolant-side and sizing path (HSB Ex. 8.1-8.4, HEDH 3.7.10). The condensing path is tested by limits, closure and trends, which are not benchmarks.",
+            "HSB Eq. 20.7 as printed gives G_Le -> 0 as x -> 0 (it reduces to 2xG for constant f) and contradicts its own text, G_Le = G(1 - x) + G_e, so the text and Eq. 20.6 are used. HSB's wording for the bracket of Eq. 20.6 is 'at the local conditions'. The common-mass-flux evaluation, (mu_G/mu_L)^z, is used because the literal actual-flow evaluation fails the limits: it counts the density ratio twice and diverges as x -> 1.",
             "Lockhart-Martinelli, Chisholm's C and Eq. 10.58 are tube correlations, and HSB gives no plate-specific C. Kumar's suggestion (HSB Sec. 20.2.1) is the only basis for using them on plates. The boundary used for 'turbulent' is the correlation's lowest Reynolds number. Eq. 10.58 is stated as a fit for the tt region and is used in all zones, since HSB Sec. 20.2.1 names it for this method.",
             "The two-phase port loss has no procedure in the sources: HSB says only 'see Chapter 8'. Lecture 14's 1.4 velocity heads are applied at the inlet density (homogeneous, Eq. 10.57), which bounds the loss because the vapour port dominates. Plate-entry losses (HEDH Sec. 3.7.6) and manifold flow distribution are not calculated.",
             "HEDH Sec. 3.7.8 gives port-manifold distribution only as curves for one plate pack and a qualitative method; there is no criterion for acceptable maldistribution, so the indicators are reported as not assessed.",
             "Several coolant passes (HSB Fig. 20.2) make the vapour channels unequal. No source gives a rating method, and HEDH Sec. 3.7.12 leaves it to manufacturers. Here all zones use the overall LMTD, which does not capture the failure HSB warns about.",
-            "Several vapour passes, subcooling by a flooded plate (HSB Fig. 20.1), desuperheating, mixtures and non-condensables have no plate procedure in the sources and are left out.",
-            "The approximate design of Lecture 16 and HEDH Sec. 3.7.10C rests on three chart curves that are not digitised here. Only its property correction factors are reported, for use with the charts by hand.",
-            "Martin's (1995) chevron equations in Lecture 14 are not implemented: the slide's friction equation drops constants a and c of the stated set, and f_0(Re), f_1(Re) and L_c are not given. Chevron angle therefore acts only through the enhancement factors or the entered coefficients.",
+            "Outside this module's scope: several vapour passes, subcooling by a flooded plate (HSB Fig. 20.1), desuperheating, mixtures and non-condensables (no procedure in HSB or HEDH).",
+            "The approximate design of HEDH Sec. 3.7.10C and Lecture 16 runs on its three digitised curves as a cross-check and does not set the sizing. Its curves are for liquid/liquid duty, so it is applied to the coolant side only. HEDH gives no curve for a condensing side.",
+            "Outside this module's scope: Martin's (1995) chevron equation (no procedure in HSB or HEDH: Lecture 14 states its form without f_0(Re), f_1(Re) or L_c, and its friction equation drops constants a and c). Chevron angle acts through the enhancement factors of HSB Ex. 8.4 or the entered coefficients.",
             "The F for R > 0 and the charts of Lecture 17 are not needed: the condensing side is isothermal, so C_r = 0. HSB Table 8.1 and the VDI charts are not used.",
-            "The sources disagree on limits. Gasketed: -40 to 180 degC and 30 bar (Lecture 2 Table 3.1, Lecture 13 table, used here); -40 to 260 degC and 4 bar (Lecture 13 'disadvantages' slide); 250 degC and 25 atm (HSB Sec. 8.2); 2000 kN/m2 and 150 degC for most units (HEDH Sec. 3.7.1).",
+            "Limits differ between the sources, and the module uses these. Gasketed pressure: 2000 kN/m2 (HEDH 3.7.10A, 4.4.2 Table 4), which lies inside HSB Table 4.1's 1.6 to 2.5 MPa; HSB Sec. 17.3.3 and Lecture 13 call about 4 bar the normal figure, and HSB Sec. 8.2 gives 25 atm. Welded pressure: 30 bar (HSB Table 4.1, Lecture 13). Temperature: -40 to 180 degC gasketed and -200 to 260 degC welded (Lecture 13 table), with the rubber's own limit from HEDH Table 2 on top.",
+            "Outside this module's scope: plate, frame and tie-bolt stress (no procedure in HSB or HEDH).",
         ]
 
     # ------------------------------------------------------------------------------------- steps
@@ -763,24 +936,20 @@ class PlateModule(CondenserModule):
 
     @staticmethod
     def _geometry_steps(i: PlateInputs, r: DesignResult) -> None:
-        g, cool = i.geometry, i.coolant_props
+        g = i.geometry
         src = "HSB Eqs. 8.7, 8.8; Lecture 14"
         if g.area_basis == "projected":
-            r.step("Equivalent diameter. Projected basis, as the entered correlation states", "De", "De = 2 b", f"2 ({_n(g.b)})", equivalent_diameter(g.b), "m", GEO, src)
+            r.step("Equivalent diameter, projected basis", "De", "De = 2 b", f"2 ({_n(g.b)})", equivalent_diameter(g.b), "m", GEO, src)
             r.step("Area of one plate, projected basis", "a", "a = L W", f"{_n(g.L)} ({_n(g.W)})", plate_area(g.L, g.W), "m2", GEO, "HSB Eq. 8.2")
         else:
-            r.step("Equivalent diameter. Developed basis, as the entered correlation states", "De", "De = 2 b / phi", f"2 ({_n(g.b)}) / {_n(g.phi)}", equivalent_diameter(g.b, g.phi, "developed"), "m", GEO, src)
+            r.step("Equivalent diameter, developed basis", "De", "De = 2 b / phi", f"2 ({_n(g.b)}) / {_n(g.phi)}", equivalent_diameter(g.b, g.phi, "developed"), "m", GEO, src)
             r.step("Area of one plate, developed basis", "a", "a = L W phi", f"{_n(g.L)} ({_n(g.W)}) ({_n(g.phi)})", plate_area(g.L, g.W, g.phi, "developed"), "m2", GEO, "Lecture 17 rating Step 6")
         r.step("Channel flow area", "A_f", "A_f = b W", f"{_n(g.b)} ({_n(g.W)})", g.b * g.W, "m2", GEO, "Lecture 14; Lecture 17 rating Step 2")
         r.step("Wall resistance", "R_w", "R_w = t / k_plate", f"{_n(g.t)} / {_n(g.k_plate)}", g.t / g.k_plate, "m2.K/W", THE, "HSB Eq. 8.3")
-        psi, phi_dp = property_correction_factors(cool.rho, cool.cp, cool.k, cool.mu)
-        w = REFERENCE_WATER
-        r.step("For a hand approximate design only: shift of the alpha ordinate of the water curves, coolant (not used in the sizing below)", "psi_alpha", "psi_alpha = (k/k_w)^0.6 (rho/rho_w)^0.67 (cp/cp_w)^0.4 (mu/mu_w)^-0.27", f"({_n(cool.k)}/{w['k']})^0.6 ({_n(cool.rho)}/{w['rho']:g})^0.67 ({_n(cool.cp)}/{w['cp']:g})^0.4 ({_n(cool.mu)}/{w['mu']})^-0.27", psi, "", THE, "Lecture 16 Step 2; HEDH 3.7.10C")
-        r.step("For a hand approximate design only: shift of the dP ordinate of the water curves, coolant (not used in the sizing below)", "phi_dP", "phi_dP = (mu/mu_w)^0.252 (rho/rho_w)^0.748", f"({_n(cool.mu)}/{w['mu']})^0.252 ({_n(cool.rho)}/{w['rho']:g})^0.748", phi_dp, "", HYD, "Lecture 16 Step 3; HEDH 3.7.10C")
 
     @staticmethod
     def _thermal_steps(i: PlateInputs, d: _Duty, ev: _Evaluation, r: DesignResult, N_thermal: int, limited_by: str) -> None:
-        g, k, p, cool = i.geometry, i.correlation, i.condensing, i.coolant_props
+        g, k, p, cool = i.geometry, plate_coefficients(i.correlation), i.condensing, i.coolant_props
         passes = _as_int(i.coolant.passes)
         bw = g.b * g.W
         r.step(f"Number of plates, set by the {limited_by}. Smallest count that meets the duty: {N_thermal}", "N", "N = smallest allowed count with A(N) >= A_req(N), and the allowable pressure drops met", f"N = {N_thermal} for the duty; {ev.N} after the pressure-drop limits; see the iteration tables", ev.N, "", GEO, "Lecture 17 sizing Steps 5-10; HSB Sec. 20.2.2")
@@ -791,7 +960,7 @@ class PlateModule(CondenserModule):
         r.step("Coolant Reynolds number", "Re_c", "Re_c = rho u_c De / mu", f"{_n(cool.rho)} ({_n(ev.u_c)}) ({_n(ev.de)}) / {_n(cool.mu)}", ev.re_c, "", HYD, "Lecture 14; Lecture 17 rating Step 3")
         r.step("Coolant Prandtl number", "Pr_c", "Pr_c = cp mu / k", f"{_n(cool.cp)} ({_n(cool.mu)}) / {_n(cool.k)}", ev.pr_c, "", THE, "Lecture 14")
         visc = f" ({_n(ev.visc_ratio)})^{_n(ev.m_exp)}" if ev.m_exp else ""
-        r.step("Coolant Nusselt number, from the entered plate coefficients", "Nu_c", "Nu_c = C_h Re^y Pr^n (mu/mu_w)^m", f"{_n(k.C_h)} ({_n(ev.re_c)})^{_n(k.y)} ({_n(ev.pr_c)})^{_n(k.n_pr)}{visc}", ev.nu_c, "", THE, "Lecture 14; HSB Ex. 8.1")
+        r.step(f"Coolant Nusselt number. Correlation: {k.name}", "Nu_c", "Nu_c = C_h Re^y Pr^n (mu/mu_w)^m", f"{_n(k.C_h)} ({_n(ev.re_c)})^{_n(k.y)} ({_n(ev.pr_c)})^{_n(k.n_pr)}{visc}", ev.nu_c, "", THE, "Lecture 14; HSB Ex. 8.1")
         r.step("Coolant heat transfer coefficient", "h_c", "h_c = E_h Nu_c k / De", f"{_n(k.enhancement_h)} ({_n(ev.nu_c)}) ({_n(cool.k)}) / {_n(ev.de)}", ev.h_c, "W/m2.K", THE, "Lecture 17 rating Step 5; HSB Ex. 8.4 for E_h")
 
         r.step("Vapour flow per channel. One pass on the vapour side", "m_v", "m_v = M_v / ((N + 1)/2)", f"{_n(i.vapour.m_dot)} / {_n(ev.n_ch)}", ev.m_ch_v, "kg/s", HYD, "Lecture 17 rating Step 1")
@@ -816,7 +985,7 @@ class PlateModule(CondenserModule):
             if passes == 1:
                 r.step(f"Zone temperature difference, {tag}: log mean of T_sat - T_c at the zone ends", "dT_i", "dT_i = [(T_sat - T_c1) - (T_sat - T_c2)] / ln[(T_sat - T_c1)/(T_sat - T_c2)]", f"[({_n(p.T_sat)} - {_n(z.T_c1)}) - ({_n(p.T_sat)} - {_n(z.T_c2)})] / ln[({_n(p.T_sat)} - {_n(z.T_c1)})/({_n(p.T_sat)} - {_n(z.T_c2)})]", z.dT, "K", THE, "HSB Sec. 20.2.2 step 3; Eq. 8.23")
             else:
-                r.step(f"Zone temperature difference, {tag}: several coolant passes have no single axial profile, so the overall LMTD is used", "dT_i", "dT_i = LMTD", _n(d.lmtd), z.dT, "K", THE, "Module assumption; see the gaps")
+                r.step(f"Zone temperature difference, {tag}: several coolant passes have no single axial profile, so the overall LMTD is used", "dT_i", "dT_i = LMTD", _n(d.lmtd), z.dT, "K", THE, "Design basis of this module")
             r.step(f"Zone area, {tag}", "dA_i", "dA_i = dQ / (U_i dT_i F)", f"{_n(z.dQ)} / ({_n(z.U)} {_n(z.dT)} {_n(ev.F)})", z.dA, "m2", THE, "HSB Sec. 20.2.2 step 3")
 
         r.step("End-effect correction. The end coolant channel has one plate, so it heats less and F < 1 at finite N. C = 0 solution checked against Lecture 15 Fig. 2.25", "F", "1 - P = y^(2(N_p - 1)) [y + (n_cp - 1) y^2] / n_cp; NTU = -ln(y) N / n_cp; F = -ln(1 - P)/NTU", f"P = {_n(d.P)}, N = {ev.N}, N_p = {passes}, n_cp = {_n(ev.n_ch / passes)}", ev.F, "", THE, "Derived from Lecture 15 channel equations at C = 0; Fig. 2.25")
@@ -832,7 +1001,7 @@ class PlateModule(CondenserModule):
 
     @staticmethod
     def _hydraulic_steps(i: PlateInputs, d: _Duty, ev: _Evaluation, hy: _Hydraulics, r: DesignResult) -> None:
-        g, k, p, cool = i.geometry, i.correlation, i.condensing, i.coolant_props
+        g, k, p, cool = i.geometry, plate_coefficients(i.correlation), i.condensing, i.coolant_props
         passes = _as_int(i.coolant.passes)
         d_v = g.port_d_vapour if g.port_d_vapour is not None else g.port_d
         visc = f" ({_n(ev.visc_ratio)})^-{_n(ev.m_exp)}" if ev.m_exp else ""
@@ -870,6 +1039,7 @@ class PlateModule(CondenserModule):
     @staticmethod
     def _outputs(i: PlateInputs, d: _Duty, ev: _Evaluation, hy: _Hydraulics, r: DesignResult, limited_by: str) -> None:
         p = i.condensing
+        r.output("correlation", "Plate correlation used", plate_coefficients(i.correlation).name, "", THE, "HSB Ex. 8.1, 8.2; HEDH 3.7.4, 3.7.5")
         r.output("Q", "Heat duty", d.Q, "W", THE, S202)
         r.output("m_dot_coolant", "Coolant flow rate", d.m_c, "kg/s", THE, "Lecture 17 sizing Step 1")
         r.output("T_c_out", "Coolant outlet temperature", d.T_c_out, "degC", THE, "Lecture 17 sizing Step 1")
@@ -910,7 +1080,7 @@ class PlateModule(CondenserModule):
     # ------------------------------------------------------------------------------------- checks
     @staticmethod
     def _checks(i: PlateInputs, d: _Duty, ev: _Evaluation, hy: _Hydraulics, r: DesignResult) -> None:
-        g, k, p, s, v, cool = i.geometry, i.correlation, i.condensing, i.coolant, i.vapour, i.coolant_props
+        g, k, p, s, v, cool = i.geometry, plate_coefficients(i.correlation), i.condensing, i.coolant, i.vapour, i.coolant_props
         passes = _as_int(s.passes)
         welded = g.construction == "brazed or welded"
 
@@ -919,14 +1089,18 @@ class PlateModule(CondenserModule):
         r.check("Coolant Reynolds number in the correlation range", ev.re_c >= k.re_min, f"Re_c = {ev.re_c:.0f}, lowest for the correlation = {k.re_min:g}", THE, "HEDH 3.7.4, 3.7.5")
         re_le = min(z.re_le for z in ev.zones)
         r.check("Effective condensing Reynolds number in the correlation range", re_le >= k.re_min, f"smallest Re_Le = {re_le:.0f}, lowest for the correlation = {k.re_min:g}", THE, "HEDH 3.7.4, 3.7.5")
-        low = [z for z in ev.zones if z.state.re_l < k.re_min or z.state.re_g < k.re_min]
+        re_top = max(ev.re_c, max(z.re_le for z in ev.zones))
+        if k.re_max is not None:
+            r.check("Reynolds numbers within the plotted range of the correlation", re_top <= k.re_max, f"largest Re = {re_top:.0f}, against Re = {k.re_max:g} where HEDH 3.7.4 Figs. 1, 2 (HSB Figs. 8.7, 8.8) stop. Above that the fit is extrapolated.", THE, "HEDH 3.7.4; HSB Figs. 8.7, 8.8")
+        r.check("Area basis matches the correlation", g.area_basis in k.bases, f"{g.area_basis} basis; the correlation states De on: {', '.join(k.bases)}. HSB Eq. 8.7: De = 2b. HEDH 3.7.3 Eq. 2: d_e = 2b/r, and HEDH 3.7.5 takes the gap as d_e/2 for budget work.", GEO, "HSB Eqs. 8.7, 8.8; HEDH 3.7.3, 3.7.5")
+        low =[z for z in ev.zones if z.state.re_l < k.re_min or z.state.re_g < k.re_min]
         cs = sorted({z.state.c for z in ev.zones})
         r.check(
             "Phase-alone friction within the correlation range", not low,
             f"{len(low)} of {len(ev.zones)} zones have a phase-alone Re below {k.re_min:g}, where f = K_p Re^-z is extrapolated. C used: {', '.join(f'{c:g}' for c in cs)} (20 tt, 12 vt, 10 tv, 5 vv).",
             HYD, "HSB Secs. 20.2.1, 10.5.2",
         )
-        if g.chevron_angle in HSB_CHEVRON_FACTORS:
+        if g.chevron_angle in HSB_CHEVRON_FACTORS and i.correlation.correlation_preset != PRESET_HEDH:
             f_h, f_f = HSB_CHEVRON_FACTORS[g.chevron_angle]
             if k.enhancement_h == 1.0 and k.enhancement_f == 1.0:
                 r.warnings.append(f"Chevron angle {g.chevron_angle:g} deg with enhancement factors of 1: the coefficients must already be for this angle. HSB Ex. 8.4 uses {f_h:g} on h and {f_f:g} on f, relative to its 30 deg fit.")
@@ -934,7 +1108,13 @@ class PlateModule(CondenserModule):
         r.check("Enlargement factor in the typical range", (1.1 <= g.phi <= 1.25) if g.phi is not None else None, phi_detail, GEO, L14)
         r.check(
             "Overall coefficient against the typical range", None,
-            f"U = {ev.U_eff:.0f} W/m2.K. Lecture 13 lists 2000-6500 W/m2.K for liquid applications; no range is given for condensing.", THE, "Lecture 13",
+            f"U = {ev.U_eff:.0f} W/m2.K. Lecture 13 lists 2000-6500 W/m2.K for liquid applications. HSB Table 4.4 lists 4000 for condensing steam on treated cooling water, 3063 on low-viscosity organic liquid, 327 on high-viscosity liquid, and no value for condensing hydrocarbons. These are single typical values, not a limit.", THE, "Lecture 13; HSB Table 4.4",
+        )
+        fouling_total = i.fouling.R_f_condensing + i.fouling.R_f_coolant
+        r.check(
+            "Fouling resistances against the plate rule", None,
+            f"R_f,cond + R_f,cool = {fouling_total:.2e} m2.K/W, as entered. HEDH 3.7.9: use not more than one-fifth of the published tubular figures. Lecture 13: about 1/3 of shell-and-tube, 1/4 to 1/10 for condensing. HEDH 3.7.9 Fig. 1, cooling tower water on 3 mm chevron plates, read to +/-0.05e-4: about 1.0e-4 at 0.45 m/s after 2000 h, about 0.47e-4 at 0.85 m/s after 2150 h. The sources give a rule against a tubular figure and no plate table, so the entered value is not judged.",
+            THE, "HEDH 3.7.9; Lecture 13",
         )
         ntu = ev.U_eff * ev.A_avail / d.C_c
         r.check("Coolant NTU in the typical range", 0.5 <= ntu <= 4.0, f"NTU = {ntu:.2f}; Lecture 13: 0.5 to 4", THE, "Lecture 13")
@@ -942,7 +1122,7 @@ class PlateModule(CondenserModule):
         if s.assumed_effectiveness is not None:
             r.check("Assumed effectiveness in the range Lecture 17 gives", 0.85 <= s.assumed_effectiveness <= 0.90, f"P = {s.assumed_effectiveness:g}; Lecture 17: 0.85 to 0.90", THE, "Lecture 17 sizing Step 1")
         if s.direction == "cocurrent":
-            r.assumptions.append("Cocurrent coolant: HEDH Sec. 3.7.12 notes that condensation then concentrates in the top half of the plate, which lowers the mean vapour velocity and the pressure drop.")
+            r.design_basis.append("Cocurrent coolant: HEDH Sec. 3.7.12 notes that condensation then concentrates in the top half of the plate, which lowers the mean vapour velocity and the pressure drop.")
 
         # Hydraulic limits
         if i.limits.dp_allow_coolant is None:
@@ -989,19 +1169,98 @@ class PlateModule(CondenserModule):
         # Mechanical and operating limits
         t_lo, t_hi = (WELDED_T_MIN_C, WELDED_T_MAX_C) if welded else (GASKETED_T_MIN_C, GASKETED_T_MAX_C)
         t_min, t_max = min(s.T_in, p.T_sat), max(p.T_sat, d.T_c_out)
-        src = "Lecture 13 table" if welded else "Lecture 2 Table 3.1; Lecture 13 table"
-        r.check("Operating temperature limit", t_lo <= t_min and t_max <= t_hi, f"{t_min:g} to {t_max:g} degC within {t_lo:g} to {t_hi:g} degC for {g.construction} units", MEC, src)
+        r.check("Operating temperature limit", t_lo <= t_min and t_max <= t_hi, f"{t_min:g} to {t_max:g} degC within {t_lo:g} to {t_hi:g} degC for {g.construction} units", MEC, "Lecture 13 table")
         p_max = max(v.pressure, s.pressure) if s.pressure is not None else v.pressure
-        r.check("Operating pressure limit", p_max <= P_MAX_BAR * 1e5, f"{p_max / 1e5:.2f} bar <= {P_MAX_BAR:g} bar. The sources differ for gasketed units: Lecture 13 also says 'generally limited to 4 bar', HSB Sec. 8.2 25 atm, HEDH 3.7.1 20 bar for most units.", MEC, src)
+        p_limit = P_MAX_WELDED_BAR if welded else P_MAX_GASKETED_BAR
+        p_note = "HSB Table 4.1: 3.0 MPa for welded plate; Lecture 13: 30 bar for welded and brazed." if welded else "HEDH 3.7.10A and 4.4.2 Table 4: 2000 kN/m2; HSB Table 4.1: 1.6 MPa, possible up to 2.5 MPa by size and temperature. HSB Sec. 17.3.3 and Lecture 13 give about 4 bar as the normal gasketed figure."
+        r.check("Operating pressure limit", p_max <= p_limit * 1e5, f"{p_max / 1e5:.2f} bar <= {p_limit:g} bar. {p_note}", MEC, "HSB Table 4.1; Lecture 13" if welded else "HEDH 3.7.10A, 4.4.2 Table 4; HSB Table 4.1")
         r.check("Low pressure and vacuum", v.pressure >= P_MIN_BAR * 1e5, f"P = {v.pressure / 1e5:.3f} bar; Lecture 13 lists 1 to 30 bar. Lecture 23: gasket leakage is hard to prevent at high vacuum. HSB Sec. 17.2: plates are not usually good for very low-pressure vapours.", MEC, "Lecture 13; Lecture 23; HSB Sec. 17.2")
-        if not welded and g.gasket_material is not None:
-            limit = GASKET_T_MAX_C[g.gasket_material]
-            r.check("Gasket material temperature limit", t_max <= limit, f"{t_max:g} degC <= {limit:g} degC for {g.gasket_material}", MEC, "Lecture 13")
-        elif not welded:
-            r.check("Gasket material temperature limit", None, "No gasket material entered. Lecture 13: nitrile 135, butyl 150, Viton 175, EPDM 150 degC.", MEC, "Lecture 13")
         if not welded:
+            PlateModule._gasket_checks(g.gasket_material, v.fluid_class, t_max, r)
             flammable = v.flammable_or_toxic
             r.check("Flammable or toxic fluid with gaskets", None if flammable is None else flammable == "no", "Not stated by the user." if flammable is None else f"Flammable or toxic: {flammable}. HSB: gasketed plates are unsuitable for toxic or highly flammable fluids because of leakage.", MEC, "HSB Secs. 8.2, 17.2")
-            r.check("Gasket compatibility with the condensing fluid", None, "Lecture 23: condensing fluid may attack the gasket material. Requires the fluid-gasket pair data from the manufacturer; not available.", MEC, "Lecture 13; Lecture 23")
-        r.check("Plate, frame and tie-bolt strength, and pressure-boundary code", None, "Not assessed. Governed by pressure-vessel rules such as ASME BPVC Section VIII and the plate-exchanger standard API 662. These were not available, and no plate stress method is in the supplied material.", MEC, "Not available")
+        r.check("Plate, frame and tie-bolt strength, and pressure-boundary code", None, "Outside this module's scope: no procedure in HSB or HEDH. HEDH 4.4.2 names the factors (load at the contact points, stress in the corrugations, material properties, test pressure up to 50% above the working pressure) and gives no formula. A real unit falls under ASME pressure-vessel rules and API 662.", MEC, "HEDH 4.4.2")
+
+    @staticmethod
+    def _gasket_checks(material: str | None, fluid_class: str | None, t_max: float, r: DesignResult) -> None:
+        """HEDH 4.4.2 Table 2: the rubber's temperature limit, and the fluid against its suitable and unsuitable lists."""
+        src = "HEDH 4.4.2 Table 2"
+        if material is None:
+            r.check("Gasket material temperature limit", None, f"No gasket material entered. {src}: SBR 87, nitrile 137, butyl 152, EPDM 152, Viton 177 degC, compressed asbestos fibre 250 degC.", MEC, src)
+            r.check("Gasket compatibility with the condensing fluid", None, "No gasket material entered.", MEC, src)
+            return
+        gasket = GASKETS[material]
+        if gasket.t_max_c is None:
+            r.check("Gasket material temperature limit", None, f"{src} gives no maximum temperature for {material}.", MEC, src)
+        else:
+            lecture = LECTURE_13_GASKET_T_MAX_C.get(material)
+            note = f" Lecture 13 prints {lecture:g} degC." if lecture is not None else ""
+            r.check("Gasket material temperature limit", t_max <= gasket.t_max_c, f"{t_max:g} degC <= {gasket.t_max_c:g} degC for {material}.{note}", MEC, src)
+        row = f"{src}, {material}: suitable for '{gasket.suitable_text}'; unsuitable for '{gasket.unsuitable_text}'."
+        if fluid_class is None:
+            r.check("Gasket compatibility with the condensing fluid", None, f"No condensing fluid class entered. {row}", MEC, src)
+            return
+        verdict = gasket_compatibility(material, fluid_class)
+        if verdict is None:
+            listed = [name for name in GASKETS if fluid_class in GASKETS[name].suitable]
+            better = f" Listed as suitable for it: {', '.join(listed)}." if listed else " No rubber in the table is listed as suitable for it."
+            detail = f"{fluid_class}: the table names this class neither way for {material}, so it does not decide this pair.{better} {row}"
+        else:
+            detail = f"{fluid_class}: listed as {'suitable' if verdict else 'unsuitable'}. {row}"
+        r.check("Gasket compatibility with the condensing fluid", verdict, detail, MEC, src)
+
+    # -------------------------------------------------------------------- HEDH 3.7.10C cross-check
+    @staticmethod
+    def _approximate_design(i: PlateInputs, d: _Duty, ev: _Evaluation, hy: _Hydraulics, r: DesignResult) -> None:
+        """HEDH 3.7.10C on the coolant side, as a cross-check on the sized unit. It does not change the sizing."""
+        src = "HEDH 3.7.10C; Lecture 16"
+        cool, g = i.coolant_props, i.geometry
+        passes = _as_int(i.coolant.passes)
+        v_dot = d.m_c / cool.rho
+        allow = i.limits.dp_allow_coolant
+        dp_pass = (allow if allow else hy.dp_c_channel) / passes / 1e3
+        basis = "the allowable pressure drop" if allow else "the sized channel pressure drop, as no allowable is entered"
+        psi, phi_dp = property_correction_factors(cool.rho, cool.cp, cool.k, cool.mu)
+        w = REFERENCE_WATER
+        r.step("Approximate design, coolant side. Shift of the alpha ordinate of the water curves", "psi_alpha", "psi_alpha = (k/k_w)^0.6 (rho/rho_w)^0.67 (cp/cp_w)^0.4 (mu/mu_w)^-0.27", f"({_n(cool.k)}/{w['k']})^0.6 ({_n(cool.rho)}/{w['rho']:g})^0.67 ({_n(cool.cp)}/{w['cp']:g})^0.4 ({_n(cool.mu)}/{w['mu']})^-0.27", psi, "", THE, "Lecture 16 Step 2; HEDH 3.7.10C")
+        r.step("Approximate design, coolant side. Shift of the dP ordinate of the water curves", "phi_dP", "phi_dP = (mu/mu_w)^0.252 (rho/rho_w)^0.748", f"({_n(cool.mu)}/{w['mu']})^0.252 ({_n(cool.rho)}/{w['rho']:g})^0.748", phi_dp, "", HYD, "Lecture 16 Step 3; HEDH 3.7.10C")
+        r.step(f"Approximate design. Pressure drop per pass, from {basis}", "dP_pass", "dP_pass = dP / H", f"{_n(dp_pass * passes)} / {passes}", dp_pass, "kN/m2", HYD, "HEDH 3.7.10C step 5(a)")
+        dp_water = dp_pass / phi_dp
+        r.step("Approximate design. The pressure drop to read on the water curves", "dP_w", "dP_w = dP_pass / phi_dP", f"{_n(dp_pass)} / {_n(phi_dp)}", dp_water, "kN/m2", HYD, "HEDH 3.7.10C steps 3, 4")
+
+        outside = []
+        v_lo, v_hi = FIG1_AREA_FLOW[0][0], FIG1_AREA_FLOW[-1][0]
+        on_fig1 = v_lo <= v_dot <= v_hi
+        area_fig1 = plate_area_from_flow(v_dot) if on_fig1 else None
+        if not on_fig1:
+            outside.append(f"Fig. 1: V = {v_dot:.4g} m3/s, drawn {v_lo:g} to {v_hi:g}")
+        area = area_fig1 if on_fig1 else plate_area(g.L, g.W)
+        a_lo, a_hi = min(FIG3_PLATE_FLOW), max(FIG3_PLATE_FLOW)
+        on_fig2 = FIG2_ALPHA_DP[0][0] <= dp_water <= FIG2_ALPHA_DP[-1][0]
+        on_fig3 = FIG3_DP[0] <= dp_water <= FIG3_DP[-1] and a_lo <= area <= a_hi
+        if not on_fig2:
+            outside.append(f"Fig. 2: dP = {dp_water:.3g} kN/m2, drawn {FIG2_ALPHA_DP[0][0]:g} to {FIG2_ALPHA_DP[-1][0]:g}")
+        if not on_fig3:
+            outside.append(f"Fig. 3: dP = {dp_water:.3g} kN/m2 and a = {area:.3g} m2, drawn {FIG3_DP[0]:g} to {FIG3_DP[-1]:g} and {a_lo:g} to {a_hi:g}")
+        alpha = psi * alpha_from_dp(dp_water) if on_fig2 else None
+        q = plate_flow_from_dp(dp_water, area) if on_fig3 else None
+        n_plates = approximate_plate_count(passes, v_dot, q) if q else None
+
+        off_chart = "outside the chart"
+        r.step("Approximate design. Plate area for the coolant flow, Fig. 1. The higher of the two liquid flows sets it", "a_approx", "a = Fig. 1(V), V = M_c / rho", f"Fig. 1({_n(v_dot)} m3/s)", area_fig1 if on_fig1 else off_chart, "m2", GEO, src)
+        r.step("Approximate design. Film coefficient alpha = 2U, Fig. 2 shifted by psi_alpha", "alpha_approx", "alpha = psi_alpha Fig. 2(dP_w)", f"{_n(psi)} Fig. 2({_n(dp_water)})", alpha if on_fig2 else off_chart, "W/m2.K", THE, src)
+        r.step(f"Approximate design. Plate flow, Fig. 3 at a = {area:.3g} m2 ({'from Fig. 1' if on_fig1 else 'this plate, as the flow is off Fig. 1'})", "q_approx", "q = Fig. 3(dP_w, a)", f"Fig. 3({_n(dp_water)}, {_n(area)})", q if on_fig3 else off_chart, "m3/s", HYD, src)
+        r.step("Approximate design. Number of plates for that plate flow", "n_approx", "n = 2 H V / q", f"2 ({passes}) ({_n(v_dot)}) / {_n(q)}" if q else "q is outside the chart", n_plates if q else off_chart, "", GEO, "HEDH 3.7.10C step 5(e); Lecture 16 Step 9")
+
+        r.output("approx_plate_area", "Approximate design: plate area, Fig. 1", area_fig1 if on_fig1 else off_chart, "m2", GEO, src)
+        r.output("approx_alpha", "Approximate design: coolant alpha, Fig. 2", alpha if on_fig2 else off_chart, "W/m2.K", THE, src)
+        r.output("approx_plate_flow", "Approximate design: plate flow, Fig. 3", q if on_fig3 else off_chart, "m3/s", HYD, src)
+        r.output("approx_n_plates", "Approximate design: plates, n = 2 H V / q", n_plates if q else off_chart, "", GEO, src)
+
+        r.check("Coolant within the viscosity limit of the approximate design", cool.mu <= HEDH_APPROX_MU_MAX, f"mu = {cool.mu:.3g} kg/m.s <= {HEDH_APPROX_MU_MAX:g} kg/m.s (turbulent flow condition)", THE, "HEDH 3.7.10C")
+        sized = f"Sized unit: a = {g.L * g.W:.3g} m2, h_coolant = {ev.h_c:.0f} W/m2.K, N = {ev.N}."
+        scope = "The curves are for liquid/liquid duty, so this covers the coolant side only and HEDH's 3:1 volumetric flow ratio is not applied. HEDH: 'very approximate'."
+        covered = not outside
+        detail = (f"All three curves apply. {sized} {scope}" if covered else f"Off the drawn curves, so those readings are left out: {'; '.join(outside)}. {sized} {scope}")
+        r.check("Approximate-design charts cover the coolant duty", True if covered else None, detail, THE, src)
 

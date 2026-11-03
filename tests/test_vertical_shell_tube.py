@@ -1,6 +1,6 @@
 """Vertical shell-and-tube condenser.
 
-NO WORKED VERTICAL CONDENSER EXAMPLE exists in HSB Ch. 16 to 18, HEDH 3.3 / 3.4 or Lectures 9 to 12, 23, 24, so the whole path has no benchmark.
+No source works a complete vertical shell-and-tube condenser example (HSB Ch. 16 to 18, HEDH 3.3 / 3.4, Lectures 9 to 12, 23, 24), so the whole path has no benchmark.
 What is benchmarked are SUB-PATHS, labelled as such: shell-side Bell-Delaware (HEDH 3.3.9, HSB Ex. 6.2), Kern (HSB Ex. 6.1), tube-side coolant (HSB Ex. 6.4), the
 tube count (HEDH 3.3.9), the shear term of the condensing coefficient (HSB Ex. 16.2) and flooding (HSB Ex. 10.5). The rest is tested by hand-checked values,
 limiting cases, closure and trends, which are not benchmarks.
@@ -14,8 +14,8 @@ from condenser_app.common.properties import pentane_hsb_example_16_2, saturated,
 from condenser_app.modules import MODULES
 from condenser_app.modules import vertical_shell_tube as vst
 from condenser_app.modules.vertical_shell_tube import (
-    DOWNFLOW, LAYOUT_30, LAYOUT_90, MATERIAL_A, MATERIAL_B, REFLUX, SHELL_SIDE,
-    BundleGeometry, CoolantStream, SolverOptions, VapourStream, VelocityLimits, VerticalShellTubeInputs,
+    DOWNFLOW, HEAD_FIXED, HEAD_PULL_1000, HEAD_PULL_2000, HEAD_SPLIT, LAYOUT_30, LAYOUT_45, LAYOUT_90, MATERIAL_A, MATERIAL_B, REFLUX, SHELL_SIDE,
+    BundleGeometry, CoolantStream, MechanicalInputs, SolverOptions, VapourStream, VelocityLimits, VerticalShellTubeInputs,
 )
 from condenser_app.reporting import to_excel, to_pdf
 from condenser_app.schemas import CheckState, FoulingFactors, PressureDropLimits, Status
@@ -25,7 +25,7 @@ KEY = "vertical_shell_tube"
 T_SAT = 61.85
 
 
-def inputs(variant=DOWNFLOW, geometry=None, vapour=None, coolant=None, fouling=None, limits=None, velocity=None, solver=None):
+def inputs(variant=DOWNFLOW, geometry=None, vapour=None, coolant=None, fouling=None, limits=None, velocity=None, solver=None, mechanical=None):
     fluid = saturated("n_pentane", T_SAT)
     gas = saturated_vapour("n_pentane", T_SAT)
     return VerticalShellTubeInputs(
@@ -38,6 +38,7 @@ def inputs(variant=DOWNFLOW, geometry=None, vapour=None, coolant=None, fouling=N
         fouling=FoulingFactors(**{**dict(R_f_condensing=0.0, R_f_coolant=0.0), **(fouling or {})}),
         limits=PressureDropLimits(**(limits or {})),
         velocity=VelocityLimits(**(velocity or {})),
+        mechanical=MechanicalInputs(**(mechanical or {})),
         solver=SolverOptions(**(solver or {})),
     )
 
@@ -203,15 +204,26 @@ def test_every_step_is_a_chain_and_gaps_are_stated():
     for s in r.steps:
         assert s.label and s.symbol and s.formula and s.substitution and s.source, s
         assert "=" in s.formula or s.symbol in ("N",), s
-    assert any("NO WORKED VERTICAL CONDENSER EXAMPLE" in g for g in r.source_gaps)
-    assert any("Why it iterates" in a and "First guess" in a and "Update" in a and "Stop" in a for a in r.assumptions)
+    assert any("No source works a complete vertical shell-and-tube condenser example" in g for g in r.scope_limits)
+    assert any("Why it iterates" in a and "First guess" in a and "Update" in a and "Stop" in a for a in r.design_basis)
     assert any("Bell-Delaware" in s.label and "Kern" in s.label for s in r.steps)
-    assert any("Kosky-Staub" in a and "Boyko-Kruzhilin" in a for a in r.assumptions)
-    assert any("Suction" in a for a in r.assumptions)
-    for name in ("Tube vibration", "Pressure boundary", "Coolant nozzle size", "Venting"):
+    assert any("Kosky-Staub" in a and "Boyko-Kruzhilin" in a for a in r.design_basis)
+    assert any("Suction" in a for a in r.design_basis)
+    for name in ("Pressure boundary", "Coolant nozzle size", "Venting"):
         assert check_state(r, name) is CheckState.NOT_ASSESSED
-    assert any("ASME" in c.detail and "TEMA" in c.detail for c in r.checks)
-    assert {s.category.value for s in r.steps} >= {"thermal", "hydraulic", "geometric"}
+    assert any("does not establish code compliance" in c.detail and "ASME" in c.detail and "TEMA" in c.detail for c in r.checks)
+    assert {s.category.value for s in r.steps} >= {"thermal", "hydraulic", "geometric", "mechanical"}
+
+
+def test_wording_makes_no_compliance_claim_and_names_no_missing_material():
+    i = MODULES[KEY].example_inputs()
+    r = run_design(KEY, i)
+    text = " ".join(r.design_basis + r.scope_limits + r.warnings + [c.name + " " + c.detail for c in r.checks] + [s.label for s in r.steps])
+    for stale in ("supplied", "project drive", "Replace or confirm", "UNVERIFIED", "not available", "not digitised"):
+        assert stale not in text, stale
+    assert "complies" not in text.lower()
+    assert any("Belter" in g and "only Lecture 24" in g for g in run_design(KEY, reflux_inputs()).scope_limits)
+    assert any("3.24" in a and "0.224" in a for a in r.design_basis)  # Friedel constants of the two books
 
 
 def test_energy_closure_and_coolant_profile():
@@ -388,8 +400,8 @@ def test_suction_is_a_choice_and_raises_the_coefficient():
     assert on.get("area_required") < off.get("area_required")
     assert off.get("area_other_suction") == pytest.approx(on.get("area_required"), rel=1e-9)
     assert on.get("area_other_suction") == pytest.approx(off.get("area_required"), rel=1e-9)
-    assert any("OFF, the default" in a for a in off.assumptions)
-    assert any("ON by the user" in a for a in on.assumptions)
+    assert any("OFF, the default" in a for a in off.design_basis)
+    assert any("ON by the user" in a for a in on.design_basis)
 
 
 def test_boyko_kruzhilin_and_chen_are_recorded():
@@ -428,6 +440,309 @@ def test_geometry_checks_fire():
     assert check_state(r, "Number of baffles") is CheckState.FAIL
     r = run(geometry={"baffle_cut": 10.0, "n_tubes": 250})
     assert check_state(r, "Baffle cut in the range") is CheckState.FAIL
+
+
+# ------------------------------------------------------------------- HEDH Fig. 3.3.5(4), digitised
+def test_baffle_cut_region_reads_the_chart():
+    # Centre line of the SBC band: read at 20% at 0.2 and 36.4% at 1.0. The band holds its centre line.
+    for ratio, centre in vst.FIG_4_SBC_CENTRE:
+        low, high = vst.baffle_cut_region("SBC", ratio)
+        assert low <= centre <= high
+    assert vst.baffle_cut_region("SBC", 0.19) is None and vst.baffle_cut_region("SBC", 1.01) is None
+    # CV: flat top at 45%, floor about 31 to 40%, starting at 0.22.
+    assert vst.baffle_cut_region("CV", 0.6)[1] == 45.0
+    assert vst.baffle_cut_region("CV", 0.22) == (31.0, 31.0)
+    assert vst.baffle_cut_region("CV", 0.21) is None
+    assert vst.baffle_cut_region("CV", 1.0)[0] == 40.0
+
+
+@pytest.mark.parametrize("cut, ratio, state", [
+    (25.0, 0.4, CheckState.PASS), (21.0, 0.3, CheckState.PASS),  # inside the band
+    (45.0, 0.4, CheckState.FAIL),  # the CV region is not for a single-phase coolant
+    (15.0, 0.4, CheckState.FAIL),  # below the band
+    (25.0, 0.1, CheckState.FAIL),  # off the chart
+])
+def test_baffle_cut_check_is_a_real_verdict(cut, ratio, state):
+    r = run(geometry={"n_tubes": 250, "baffle_cut": cut, "baffle_spacing_ratio": ratio})
+    assert check_state(r, "Fig. 3.3.5(4)") is state
+
+
+def test_baffle_cut_check_allows_for_the_read_uncertainty():
+    # One step beyond the band edge at the example's ratio: inside the +-1% read passes, outside it fails.
+    i = inputs(geometry={"n_tubes": 250})
+    d = vst._duty(i)
+    ev = vst._evaluate(i, d, 250)
+    ratio = ev.shell.L_bc / ev.D_s
+    _, high = vst.baffle_cut_region("SBC", ratio)
+    assert check_state(run(geometry={"n_tubes": 250, "baffle_cut": high + 0.9}), "Fig. 3.3.5(4)") is CheckState.PASS
+    assert check_state(run(geometry={"n_tubes": 250, "baffle_cut": high + 1.1}), "Fig. 3.3.5(4)") is CheckState.FAIL
+
+
+def test_baffle_cut_not_judged_in_an_unbaffled_shell():
+    assert check_state(run_design(KEY, shell_inputs()), "Fig. 3.3.5(4)") is CheckState.NOT_ASSESSED
+
+
+# ------------------------------------------------------------------- clearance defaults, HEDH Figs. 12-14
+@pytest.mark.parametrize("head, d_s, expected", [
+    (HEAD_FIXED, 0.5, 15.3), (HEAD_FIXED, 1.2, 18.8), (HEAD_FIXED, 2.5, 25.2),
+    (HEAD_SPLIT, 0.5, 34.0), (HEAD_SPLIT, 1.5, 50.8),
+    (HEAD_PULL_1000, 1.0, 103.9), (HEAD_PULL_2000, 1.0, 119.5),
+    (HEAD_FIXED, 0.9, 17.35),  # interpolated between 800 and 1000 mm
+])
+def test_bundle_clearance_reads_fig_14(head, d_s, expected):
+    assert vst.bundle_clearance(head, d_s) * 1e3 == pytest.approx(expected, abs=1e-9)
+
+
+def test_fig_14_order_matches_the_chart_and_the_2000_kpa_curve_ends():
+    for d_s in (0.3, 0.8, 1.5):
+        assert vst.bundle_clearance(HEAD_FIXED, d_s) < vst.bundle_clearance(HEAD_SPLIT, d_s) < vst.bundle_clearance(HEAD_PULL_1000, d_s) < vst.bundle_clearance(HEAD_PULL_2000, d_s)
+    assert vst.bundle_clearance(HEAD_PULL_2000, 2.4) == pytest.approx(0.160)
+    assert not vst.shell_on_fig_14(HEAD_PULL_2000, 2.4)
+    assert vst.shell_on_fig_14(HEAD_PULL_1000, 2.4)
+
+
+def test_tube_baffle_clearance_is_fig_12():
+    assert vst.tube_baffle_clearance(19.05e-3, 0.8) == 0.8e-3
+    assert vst.tube_baffle_clearance(19.05e-3, 1.2) == 0.4e-3
+    assert vst.tube_baffle_clearance(31.75e-3, 1.2) == 0.4e-3
+    assert vst.tube_baffle_clearance(38.0e-3, 1.2) == 0.8e-3  # "All L_b,max" above about 32 mm
+
+
+def test_shell_baffle_clearance_is_eq_19():
+    assert vst.shell_baffle_clearance(1.0) == pytest.approx(7.1e-3)  # 3.1 + 0.004 (1000) mm
+
+
+def test_blank_clearances_take_the_defaults_and_entered_ones_win():
+    blank = inputs(geometry={"L_bb": None, "L_tb": None, "L_sb": None, "n_tubes": 250, "head_type": HEAD_SPLIT})
+    r = run_design(KEY, blank)
+    assert r.status in (Status.OK, Status.OK_WITH_WARNINGS), r.message
+    assert r.get("L_bb") == pytest.approx(vst.bundle_clearance(HEAD_SPLIT, r.get("D_s")), rel=1e-6)
+    assert r.get("D_s") == pytest.approx(r.get("D_otl") + r.get("L_bb"), rel=1e-12)
+    assert r.get("L_sb") == pytest.approx(3.1e-3 + 0.004 * r.get("D_s"), rel=1e-9)
+    assert r.get("L_tb") == pytest.approx(vst.tube_baffle_clearance(25.4e-3, 2.0 * r.get("L_bc")))
+    assert any(s.symbol == "L_bb" and "HEDH 3.3.5 Fig. 14" in s.source for s in r.steps)
+    entered = run(geometry={"L_bb": 20e-3, "L_tb": 0.5e-3, "L_sb": 7e-3, "n_tubes": 250, "head_type": HEAD_SPLIT})
+    assert (entered.get("L_bb"), entered.get("L_tb"), entered.get("L_sb")) == (20e-3, 0.5e-3, 7e-3)
+
+
+def test_bundle_type_changes_the_shell():
+    fixed = run(geometry={"L_bb": None, "n_tubes": 250})
+    pull = run(geometry={"L_bb": None, "n_tubes": 250, "head_type": HEAD_PULL_2000})
+    assert pull.get("D_s") > fixed.get("D_s") + 0.05
+    assert pull.get("D_otl") == pytest.approx(fixed.get("D_otl"))
+
+
+def test_shell_off_the_clearance_chart_warns():
+    r = run(geometry={"L_bb": None, "n_tubes": 6000, "head_type": HEAD_PULL_2000, "D_o": 25.4e-3, "pitch": 31.75e-3})
+    assert r.get("D_s") > 1.96
+    assert any("outside the curve" in w for w in r.warnings)
+
+
+# ------------------------------------------------------------------- standard sizes, HEDH 4.2.5
+def test_next_standard_shell_and_count_from_table_2a():
+    r = run_design(KEY, inputs(geometry={"layout": LAYOUT_30, "n_tubes": 300, "shell_fouling": "no"}))
+    assert 0.591 < r.get("D_s") < 0.635
+    assert r.get("D_s_standard") == 0.635  # table: 591, 635
+    assert (r.get("n_tubes_table_full"), r.get("n_tubes_table_reduced")) == (334, 311)  # 25.4 x 31.75, 1 pass
+    assert check_state(r, "Standard shell holds") is CheckState.PASS
+    # Eq. 3.3.5(16) puts 312 tubes in a 631 mm shell too, but the 635 mm shell holds 311 at the reduced count, so the check fails and names the next one.
+    tight = run_design(KEY, inputs(geometry={"layout": LAYOUT_30, "n_tubes": 312, "shell_fouling": "no"}))
+    assert tight.get("D_s_standard") == 0.635
+    assert check_state(tight, "Standard shell holds") is CheckState.FAIL
+    assert "686 mm" in next(c.detail for c in tight.checks if "Standard shell holds" in c.name)
+
+
+def test_standard_shell_count_only_for_the_tables_layouts():
+    square = run(geometry={"n_tubes": 250})
+    assert square.get("D_s_standard") >= square.get("D_s")
+    assert check_state(square, "Standard shell holds") is CheckState.NOT_ASSESSED
+    floating = run(geometry={"layout": LAYOUT_30, "n_tubes": 250, "head_type": HEAD_SPLIT, "shell_fouling": "no"})
+    assert check_state(floating, "Standard shell holds") is CheckState.NOT_ASSESSED
+
+
+def test_tube_length_range_depends_on_the_bundle():
+    assert check_state(run(geometry={"L": 12.0, "n_tubes": 100}), "common range of HEDH 4.2.5") is CheckState.PASS  # fixed: 3.6 to 15 m
+    assert check_state(run(geometry={"L": 12.0, "n_tubes": 100, "head_type": HEAD_SPLIT}), "common range of HEDH 4.2.5") is CheckState.FAIL  # removable: 3.6 to 9 m
+
+
+# ------------------------------------------------------------------- tube wall
+@pytest.mark.parametrize("metal, t, state", [
+    ("carbon steel", 2.77e-3, CheckState.PASS), ("carbon steel", 2.11e-3, CheckState.FAIL),
+    ("18Cr/8Ni stainless (S30400)", 2.11e-3, CheckState.PASS), ("copper nickel 90/10 (C70600)", 1.65e-3, CheckState.FAIL),
+])
+def test_tube_wall_check_is_a_real_verdict_at_25_40_mm(metal, t, state):
+    r = run(geometry={"t_wall": t, "n_tubes": 250}, mechanical={"tube_metal": metal})
+    assert check_state(r, "Tube wall thickness against") is state
+
+
+def test_tube_wall_not_judged_outside_the_table():
+    r = run(geometry={"D_o": 38e-3, "t_wall": 2.5e-3, "pitch": 47.5e-3, "n_tubes": 150})
+    assert check_state(r, "Tube wall thickness against") is CheckState.NOT_ASSESSED
+
+
+# ------------------------------------------------------------------- pressure boundary in the module
+PRESSURES = {"design_pressure_shell": 2000e3, "design_pressure_tube": 500e3}
+
+
+def test_pressure_boundary_results_on_a_fixed_tubesheet():
+    r = run(geometry={"n_tubes": 250}, mechanical=PRESSURES)
+    d_s = r.get("D_s")
+    hand = 2000e3 * (d_s / 2 + 3e-3) / (121e6 * 0.85 - 0.6 * 2000e3)
+    assert r.get("t_shell_required") == pytest.approx(hand)
+    assert r.get("t_shell_selected") == pytest.approx(max(hand + 3e-3, 9.5e-3))
+    assert r.get("t_tubesheet") == pytest.approx(0.1 * d_s)
+    assert r.get("t_tube_required") == pytest.approx(500e3 * (25.4e-3 - 2 * 2.11e-3) / 2 / (121e6 - 0.3e6))
+    assert check_state(r, "Tube wall against internal") is CheckState.PASS
+    assert check_state(r, "Tubesheet shear") is CheckState.NOT_ASSESSED
+
+
+def test_pressure_boundary_floating_head_uses_eq_17_and_the_shear_criterion():
+    r = run(geometry={"n_tubes": 250, "head_type": HEAD_SPLIT, "L_bb": None}, mechanical={**PRESSURES, "gasket_diameter": 0.8})
+    assert r.get("t_tubesheet") == pytest.approx(0.8 / 2 * math.sqrt(2000e3 / 121e6))
+    assert r.get("t_tubesheet_total") == pytest.approx(r.get("t_tubesheet") + 3e-3)
+    assert check_state(r, "Tubesheet shear") is CheckState.PASS
+    high = run(geometry={"n_tubes": 250, "head_type": HEAD_SPLIT}, mechanical={"design_pressure_shell": 15e6, "design_pressure_tube": 500e3})
+    assert check_state(high, "Tubesheet shear") is CheckState.FAIL
+    blank_gasket = run(geometry={"n_tubes": 250, "head_type": HEAD_SPLIT}, mechanical=PRESSURES)
+    assert any("G = D_s" in s.label for s in blank_gasket.steps)
+
+
+def test_thin_tube_fails_the_pressure_check():
+    r = run(geometry={"n_tubes": 250, "t_wall": 0.2e-3}, mechanical={"design_pressure_shell": 500e3, "design_pressure_tube": 20e6})
+    assert check_state(r, "Tube wall against internal") is CheckState.FAIL
+
+
+def test_pressure_boundary_needs_the_pressures():
+    r = run(geometry={"n_tubes": 250})
+    assert check_state(r, "Pressure boundary") is CheckState.NOT_ASSESSED
+    assert "t_shell_required" not in {o.key for o in r.outputs}
+
+
+@pytest.mark.parametrize("mech, field", [
+    ({"design_pressure_shell": 200e6, "design_pressure_tube": 1e5}, "mechanical.design_pressure_shell"),
+    ({"design_pressure_shell": 1e5, "design_pressure_tube": 300e6}, "mechanical.design_pressure_tube"),
+])
+def test_pressure_too_high_for_the_stress_is_refused(mech, field):
+    r = run(geometry={"n_tubes": 250}, mechanical=mech)
+    assert r.status is Status.INVALID_INPUT
+    assert field in {issue.field for issue in r.input_issues}
+
+
+# ------------------------------------------------------------------- vibration in the module (hand values; HEDH 4.6 has no worked example)
+def test_vibration_chain_by_hand_for_the_shell_side_coolant():
+    i = inputs(geometry={"n_tubes": 250})
+    r = run_design(KEY, i)
+    d = vst._duty(i)
+    ev = vst._evaluate(i, d, 250)
+    z = vst.VerticalShellTubeModule._vibration_values(i, ev)
+    D_o, D_i = 25.4e-3, 25.4e-3 - 2 * 2.11e-3
+    rho_s, rho_t = i.coolant_props.rho, i.condensing.rho_l
+    assert z.span == pytest.approx(2.0 * ev.shell.L_bc)
+    assert z.k == pytest.approx(2.90)  # in-line, pitch ratio 1.25
+    me = rho_t * math.pi / 4 * D_i**2 + 7900 * math.pi / 4 * (D_o**2 - D_i**2) + z.k * rho_s * math.pi / 4 * D_o**2
+    assert z.M_e == pytest.approx(me)
+    inertia = math.pi * (D_o**4 - D_i**4) / 64
+    fn = 10.0 / (2 * math.pi) * math.sqrt(199e9 * inertia / (me * z.span**4))
+    assert z.f_n == pytest.approx(fn)
+    assert z.u_crit == pytest.approx(2.0 * fn * D_o * math.sqrt(me * 0.10 / (rho_s * D_o**2)))
+    # 90 deg square: p_l = p_t = pitch
+    assert z.f_tb == pytest.approx(z.u_c * D_o / 31.75e-3**2 * (3.05 * (1 - D_o / 31.75e-3) ** 2 + 0.28))
+    assert z.f_vs == pytest.approx(0.415 * z.u_c / D_o)
+    half, tip = ev.d_ctl / 2, ev.D_s * 0.25
+    gap = ev.shell.L_bc * 2 * math.sqrt(half**2 - tip**2) / 31.75e-3 * (31.75e-3 - D_o)
+    assert z.u_c == pytest.approx(0.8 * d.m_c / (rho_s * gap))
+    assert r.get("f_n") == pytest.approx(z.f_n)
+    assert r.get("u_crit") == pytest.approx(z.u_crit)
+
+
+def test_vibration_verdicts_follow_the_span():
+    short = run(geometry={"n_tubes": 250, "baffle_spacing": 0.2})
+    long = run(geometry={"n_tubes": 250, "baffle_spacing": 0.9})
+    assert short.get("f_n") > long.get("f_n") * 4  # f_n goes as 1/L^2
+    assert check_state(short, "fluid elastic") is CheckState.PASS
+    r = run(geometry={"n_tubes": 40, "baffle_spacing": 0.9})
+    assert check_state(r, "fluid elastic") is CheckState.FAIL
+    for name in ("fluid elastic", "vortex shedding", "turbulent buffeting"):
+        assert check_state(short, name) in (CheckState.PASS, CheckState.FAIL)
+
+
+def test_vibration_on_the_shell_side_vapour():
+    i = shell_inputs()
+    r = run_design(KEY, i)
+    d = vst._duty(i)
+    ev = vst._evaluate(i, d, r.get("n_tubes"))
+    z = vst.VerticalShellTubeModule._vibration_values(i, ev)
+    assert z.fluid == "vapour" and z.delta == 0.03 and z.span == 0.8
+    assert z.rho_shell == i.condensing.rho_v
+    assert z.u_c == pytest.approx(ev.u_vapour)
+    assert check_state(r, "acoustic") is CheckState.NOT_ASSESSED
+
+
+def test_acoustic_step():
+    i = shell_inputs()
+    r = run_design(KEY, i)
+    d = vst._duty(i)
+    z = vst.VerticalShellTubeModule._vibration_values(i, vst._evaluate(i, d, r.get("n_tubes")))
+    # Choose u_sound so that mode 1 sits exactly on f_vs, then far above both frequencies.
+    on = 2.0 * r.get("D_s") * z.f_vs
+    hit = run_design(KEY, shell_inputs(mechanical={"u_sound": on}))
+    assert check_state(hit, "acoustic") is CheckState.FAIL
+    clear = run_design(KEY, shell_inputs(mechanical={"u_sound": on * 1000.0 + 1000.0 * r.get("D_s") * max(z.f_vs, z.f_tb)}))
+    assert check_state(clear, "acoustic") is CheckState.PASS
+
+
+@pytest.mark.parametrize("layout, angle", [(LAYOUT_30, 30), (LAYOUT_45, 45), (LAYOUT_90, 90)])
+def test_row_pitches_and_strouhal_follow_the_layout(layout, angle):
+    assert vst.LAYOUT_ANGLE[layout] == angle
+    p_l, p_t = vst.ROW_PITCH[layout]
+    assert p_l * p_t == pytest.approx(vst.LAYOUT_DATA[layout][0], rel=0.01)  # area per tube: 0.866 or 1 pitch squared
+
+
+# ------------------------------------------------------------------- non-condensables, HEDH 3.4.9B
+def test_noncondensable_factor_multiplies_the_condensing_coefficient():
+    base = inputs(geometry={"n_tubes": 250})
+    gas = inputs(geometry={"n_tubes": 250}, vapour={"noncondensable_wt_pct": 3.0})
+    d = vst._duty(base)
+    a, b = vst._evaluate(base, d, 250), vst._evaluate(gas, d, 250)
+    assert vst.noncondensable_factor(3.0) == pytest.approx(0.46)  # 1 - 0.18 (3)
+    for s0, s1 in zip(a.steps, b.steps):
+        assert s1.alpha == pytest.approx(0.46 * s0.alpha)
+    assert b.A_req > a.A_req
+    r = run_design(KEY, gas)
+    assert r.get("area_required") == pytest.approx(b.A_req)
+    assert any(s.symbol == "F_nc" and s.value == pytest.approx(0.46) for s in r.steps)
+    assert any("F_nc" in s.formula and s.symbol == "alpha" for s in r.steps)
+    assert check_state(r, "Non-condensables below") is CheckState.PASS
+    assert any("first approximation" in a for a in r.design_basis)
+
+
+@pytest.mark.parametrize("make", [lambda **k: shell_inputs(**k), lambda **k: reflux_inputs(**k)])
+def test_noncondensable_factor_in_the_film_variants(make):
+    plain, gas = make(vapour={"m_dot": 2.0}), make(vapour={"m_dot": 2.0, "noncondensable_wt_pct": 2.0})
+    d = vst._duty(plain)
+    a, b = vst._evaluate(plain, d, 200), vst._evaluate(gas, d, 200)
+    assert b.steps[3].alpha == pytest.approx(0.64 * a.steps[3].alpha)
+
+
+def test_noncondensable_at_or_above_five_percent_is_refused():
+    for c in (5.0, 20.0):
+        r = run(vapour={"noncondensable_wt_pct": c})
+        assert r.status is Status.INVALID_INPUT
+        issue = next(k for k in r.input_issues if k.field == "vapour.noncondensable_wt_pct")
+        assert "between 5 and 80" in issue.message
+
+
+def test_noncondensable_refused_with_a_curve():
+    r = run(vapour={"noncondensable_wt_pct": 1.0, "condensation_curve": curve_text(T_SAT, T_SAT - 5.0, 1e6, 5.0)})
+    assert "vapour.noncondensable_wt_pct" in {k.field for k in r.input_issues}
+
+
+def test_venting_guidance_is_cited_and_gives_no_size():
+    downflow = next(c for c in run(geometry={"n_tubes": 250}).checks if "Venting" in c.name)
+    shell = next(c for c in run_design(KEY, shell_inputs()).checks if "Venting" in c.name)
+    assert "upper tubesheet" in downflow.detail
+    assert "1.5 m/s" in shell.detail and "lower half" in shell.detail
+    assert "No vent size" in downflow.detail and "No vent size" in shell.detail
 
 
 def test_baffle_spacing_follows_the_rules():
@@ -471,7 +786,7 @@ def test_shell_side_runs_without_baffle_data():
     r = run_design(KEY, shell_inputs())
     assert r.status in (Status.OK, Status.OK_WITH_WARNINGS), r.message
     assert r.get("L_required") <= 4.0
-    assert any("unbaffled" in a for a in r.assumptions)
+    assert any("unbaffled" in a for a in r.design_basis)
     assert not any(s.symbol == "S_m" for s in r.steps)
 
 
@@ -532,7 +847,7 @@ def test_reflux_reports_both_limits_and_stays_below_75_percent():
     assert r.get("G_condensing") <= 0.75 * min(hsb, hedh) * (1 + 1e-9)
     assert check_state(r, "Below 75%") is CheckState.PASS
     assert r.get("G_flood_lecture") == pytest.approx(hsb * (0.8 / 0.75) ** 2, rel=1e-9)
-    assert any("English" in g and "unit" in g for g in r.source_gaps)
+    assert any("English" in g and "unit" in g for g in r.scope_limits)
 
 
 def test_reflux_flooding_sets_the_count_when_the_tube_is_long_enough():
@@ -592,7 +907,7 @@ def test_sbg_constant_temperature_limit_matches_the_pure_path():
     assert sbg.status in (Status.OK, Status.OK_WITH_WARNINGS), sbg.message
     assert sbg.get("Q") == pytest.approx(q_total)
     assert sbg.get("A_con") == pytest.approx(pure.get("A_con"), rel=0.02)
-    assert any("Silver-Bell-Ghaly" in a for a in sbg.assumptions)
+    assert any("Silver-Bell-Ghaly" in a for a in sbg.design_basis)
 
 
 def test_sbg_gliding_mixture_needs_more_area():
@@ -616,7 +931,7 @@ def test_curve_refused_in_other_variants_and_with_zones():
 
 
 # ---------------------------------------------------------------------------------- inputs and form
-@pytest.mark.parametrize("path", ["geometry.D_o", "geometry.L", "geometry.pitch", "geometry.L_bb", "vapour.m_dot", "vapour.pressure", "coolant.T_in", "condensing.T_sat", "condensing.h_fg", "coolant_props.rho"])
+@pytest.mark.parametrize("path", ["geometry.D_o", "geometry.L", "geometry.pitch", "vapour.m_dot", "vapour.pressure", "coolant.T_in", "condensing.T_sat", "condensing.h_fg", "coolant_props.rho"])
 def test_missing_required_inputs(path):
     i = inputs()
     owner, name = path.split(".")
@@ -629,7 +944,6 @@ def test_missing_required_inputs(path):
 @pytest.mark.parametrize("change, field", [
     (dict(geometry={"pitch": 20e-3}), "geometry.pitch"),
     (dict(geometry={"t_wall": 13e-3}), "geometry.t_wall"),
-    (dict(geometry={"L_tb": None}), "geometry.L_tb"),
     (dict(geometry={"n_tubes": 10.5}), "geometry.n_tubes"),
     (dict(vapour={"x_out": 1.0}), "vapour.x_out"),
     (dict(vapour={"T_in": 40.0}), "vapour.T_in"),

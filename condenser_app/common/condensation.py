@@ -774,7 +774,7 @@ def friedel_terms(fluid: CondensingFluidProperties, m: float, x: float, D: float
     E = (1-x)^2 + x^2 rho_L f_GO/(rho_G f_LO); F = x^0.78 (1-x)^0.24; H = (rho_L/rho_G)^0.91 (eta_G/eta_L)^0.19 (1 - eta_G/eta_L)^0.7;
     Fr = m^2/(g D rho_TP^2); We = m^2 D/(rho_TP sigma); rho_TP = [x/rho_G + (1-x)/rho_L]^-1.
     Range: HSB: "for vertical upward flow and horizontal flow. A slightly different correlation is used for vertical downflow", which it does not
-    give. HSB nevertheless uses this form for downflow in Ex. 16.2 and Ex. 16.6, and this library follows that; the downflow version is a source gap.
+    give. HSB nevertheless uses this form for downflow in Ex. 16.2 and Ex. 16.6, and this library follows that; neither book prints the downflow version.
     Requires sigma and eta_G < eta_L, because (1 - eta_G/eta_L)^0.7 has no real value otherwise.
     Tested: Ex. 16.2 (57.08, 7360 Pa/m), Ex. 10.1 (5.101, 687.8 Pa/m). Ex. 16.5 prints 9.110 where its own terms give 9.19.
     """
@@ -816,7 +816,7 @@ def premoli_slip_ratio(fluid: CondensingFluidProperties, m: float, x: float, D: 
 
     y = beta/(1 - beta), beta = x rho_L/[x rho_L + (1-x) rho_G]; E1 = 1.578 Re^-0.19 (rho_L/rho_G)^0.22;
     E2 = 0.0273 We Re^-0.51 (rho_L/rho_G)^-0.08; Re = m D/eta_L; We = m^2 D/(sigma rho_L).
-    SOURCE GAP: the bracket goes negative at high y (at x = 0.85 in Ex. 16.2 conditions, for instance) and HSB does not say what to do. There the formula has no real value;
+    Scope limit: the bracket goes negative at high y (at x = 0.85 in Ex. 16.2 conditions, for instance) and HSB does not say what to do. There the formula has no real value;
     S = 1 (no slip) is returned, which is this library's choice and not from HSB. Range: "wide range of data for vertical pipes" (HSB). Tested: Ex. 10.3 (1.682), Ex. 16.5 (2.037).
     """
     _quality(x)
@@ -1088,8 +1088,8 @@ def flooding_vapour_velocity(D: float, rho_l: float, rho_v: float, liquid_to_vap
 def belter_kutateladze(v_l: float, d: float, rho_l: float, rho_v: float, sigma: float, mu_l: float, mu_water: float, g: float = G) -> float:
     """Kutateladze number at flooding, as printed on the Lecture 24 slide (attributed to Belter): K_G = 0.286 B0^0.26 Fr^-0.22 [1 + mu_L/mu_water]^-0.18.
 
-    B0 = d^2 g (rho_L - rho_G)/sigma; Fr = V_L (pi/4) d [g (rho_L - rho_G)^3/sigma^3]^(1/4). All groups are dimensionless, as printed. Not in HSB or HEDH, so the slide is the only source.
-    UNVERIFIED: the pi/4 in Fr is transcribed as printed but cannot be checked; a flow-per-perimeter group would have d/4, which would change K_G by 29%. The slide does not define the temperature for mu_water. Confirm against the source before design use.
+    B0 = d^2 g (rho_L - rho_G)/sigma; Fr = V_L (pi/4) d [g (rho_L - rho_G)^3/sigma^3]^(1/4). All groups are dimensionless, as printed. Not in HSB or HEDH: only Lecture 24 prints it.
+    No module uses it, for that reason and because the slide gives no temperature for mu_water. The pi/4 in Fr is as printed; no second source can test it, and a flow-per-perimeter group would have d/4, which would change K_G by 29%.
     Range: not stated on the slide. Tested: hand value only (no benchmark).
     """
     _positive(v_l=v_l, d=d, sigma=sigma, mu_l=mu_l, mu_water=mu_water)

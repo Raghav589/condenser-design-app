@@ -282,7 +282,7 @@ def test_terminal_velocity_iteration_matches_the_power_law_solution():
 
 def test_area_not_sized_without_a_fraction():
     result = run_design("direct_contact", spray_inputs())
-    assert any("Vessel cross-section" in g for g in result.source_gaps)
+    assert any("Vessel cross-section" in g for g in result.scope_limits)
     assert check_state(result, "Drop velocity much greater than vapour velocity") is CheckState.NOT_ASSESSED
 
 
@@ -293,7 +293,7 @@ def test_low_jakob_number_warns():
     assert result.get("jakob") < 20
     assert check_state(result, "Large Jakob number range") is CheckState.FAIL
     assert any("nonlinear" in w for w in result.warnings)
-    assert any("Eqs (9)-(11)" in g for g in result.source_gaps)
+    assert any("Eqs (9)-(11)" in g for g in result.scope_limits)
 
 
 # --------------------------------------------------------------------------------- jets, sheets, fans
@@ -353,7 +353,7 @@ def test_baffle_count_matches_the_stage_formula():
     assert result.get("column_height") == pytest.approx(n * 0.3)
     info = next(c for c in result.convergence if c.name == "Baffle stage march")
     assert info.rows[-1][1] >= 95.0 > info.rows[-2][1]
-    assert any("No source gives a sizing procedure for a baffle column" in g for g in result.source_gaps)
+    assert any("no baffle column stage procedure is published" in g and "built from sourced parts" in g for g in result.scope_limits)
     assert any("preliminary estimate" in w for w in result.warnings)
 
 
@@ -427,7 +427,7 @@ def test_bubble_train_with_gas_needs_final_ratio():
 
 def test_bubble_without_injector_data_gives_no_column_height():
     result = run_design("direct_contact", bubble_inputs())
-    assert any("Column height" in g for g in result.source_gaps)
+    assert any("Column height" in g for g in result.scope_limits)
     with pytest.raises(KeyError):
         result.get("column_height")
 
@@ -442,7 +442,7 @@ def test_small_subcooling_outside_the_correlation():
 def test_small_bubble_flagged():
     result = run_design("direct_contact", bubble_inputs(bubble=BubbleData(bubble_diameter=2e-3, T_pool=92.0)))
     assert check_state(result, "Constant-velocity bubble model") is CheckState.FAIL
-    assert any("1.5 mm" in g for g in result.source_gaps)
+    assert any("1.5 mm" in g for g in result.scope_limits)
 
 
 def test_immiscible_bubble_needs_viscosity_and_lowers_the_rate():
@@ -459,7 +459,7 @@ def test_immiscible_bubble_needs_viscosity_and_lowers_the_rate():
 def test_pool_is_balances_only_and_says_so():
     result = run_design("direct_contact", pool_inputs())
     assert result.get("balances_only") == "balances only"
-    assert any("balances only" in g for g in result.source_gaps)
+    assert any("balances only" in g for g in result.scope_limits)
     with pytest.raises(KeyError):
         result.get("column_height")
 
@@ -481,7 +481,7 @@ def test_contamination_and_separation_warnings():
     immiscible = run_design("direct_contact", pool_inputs(coolant_relation="immiscible", vapour=steam(m_vapour=1.0, rho_cond=626.0, cp_cond=2300.0)))
     assert any("emulsions" in w for w in immiscible.warnings)
     assert immiscible.get("density_difference") == pytest.approx(626.0 - 963.0)
-    assert any("Separator" in g for g in immiscible.source_gaps)
+    assert any("Separator" in g for g in immiscible.scope_limits)
 
 
 def test_solids_and_multicomponent_warnings():
@@ -500,6 +500,104 @@ def test_unassessed_items_are_named():
     result = run_design("direct_contact", spray_inputs())
     code = next(c for c in result.checks if c.name == "Vessel and code requirements")
     assert code.state is CheckState.NOT_ASSESSED and "ASME" in code.detail and "Heat Exchange Institute" in code.detail
+
+
+# --------------------------------------------------------------------------------- HEDH Sec. 2.6.8 design limits
+@pytest.mark.parametrize("builder", [spray_inputs, sheet_inputs, packed_inputs, bubble_inputs, pool_inputs])
+def test_terminal_approach_is_checked_on_every_type(builder):
+    assert any(c.name == "Terminal approach" for c in run_design("direct_contact", builder()).checks)
+
+
+def test_terminal_approach_limit():
+    # Hausbrand and How: T_sat - T_le = 1 degC.
+    assert check_state(run_design("direct_contact", pool_inputs()), "Terminal approach") is CheckState.PASS
+    close = pool_inputs(coolant=CoolantStream(T_in=85.0, T_out=99.5, rho=963.0, cp=4209.0))
+    assert check_state(run_design("direct_contact", close), "Terminal approach") is CheckState.FAIL
+
+
+def test_spray_states_the_maximum_drop_basis_and_the_typical_range():
+    result = run_design("direct_contact", spray_inputs())
+    assert result.get("drop_basis") == "maximum drop size"
+    assert any("Design basis: one drop size, the maximum drop size" in a for a in result.design_basis)
+    assert check_state(result, "Typical drop size") is CheckState.FAIL  # 1 mm against 125 to 520 um
+    inside = spray_inputs(spray=SprayData(drop_diameter=400e-6, injection_velocity=5.0))
+    assert check_state(run_design("direct_contact", inside), "Typical drop size") is CheckState.PASS
+    assert any("come from nozzle makers" in g for g in result.scope_limits)
+
+
+def test_packed_lower_bound_from_hedh_upper_coefficient():
+    # Example 22.3 flows: Z = [5 (4209)/(2.79e6 (1))] ln[15/(100 - T_out)]. A lower bound, far below the 0.206 m bed.
+    result = run_design("direct_contact", packed_inputs())
+    t_out = result.get("T_coolant_out")
+    z_min = 5.0 * 4209.0 / 2.79e6 * math.log(15.0 / (100.0 - t_out))
+    assert result.get("height_volumetric_min") == pytest.approx(z_min)
+    assert result.get("column_height") > z_min
+    assert check_state(result, "Bed height above the U_v lower bound") is CheckState.PASS
+    assert any("lower bound" in s.label and "upper value" in s.label for s in result.steps)
+    with pytest.raises(KeyError):
+        result.get("height_volumetric")
+
+
+def test_measured_uv_replaces_the_lower_bound():
+    result = run_design("direct_contact", packed_inputs(packed=PackedData(packing_size=3.2e-2, voidage=0.4, U_v=3e6)))
+    assert check_state(result, "Measured U_v within the reported values") is CheckState.FAIL
+    with pytest.raises(KeyError):
+        result.get("height_volumetric_min")
+
+
+def test_bubble_subcooling_checked_without_injector_data():
+    # 2 degC pure, 3.5 degC with non-condensable gas.
+    inputs = bubble_inputs(coolant=water(T_in=97.5, T_out=98.5), vapour=steam(m_vapour=0.01))
+    assert check_state(run_design("direct_contact", inputs), "Subcooling range of the correlation") is CheckState.PASS
+    gas = NonCondensable(m_gas=0.0001, M_gas=28.0, M_vapour=18.0, p_v_vent=9e4, T_vent=98.0, cp_gas=1040.0)
+    with_gas = bubble_inputs(coolant=water(T_in=97.5, T_out=98.5), vapour=steam(m_vapour=0.01), gas=gas, pressure=1.01e5)
+    assert check_state(run_design("direct_contact", with_gas), "Subcooling range of the correlation") is CheckState.FAIL
+
+
+def test_five_mm_radius_note():
+    pure = run_design("direct_contact", bubble_inputs())
+    assert any("5 mm radius" in a and "pure" in a for a in pure.design_basis)
+    assert not any(c.name == "Bubble radius with non-condensable gas" for c in pure.checks)
+
+    def with_gas(diameter, soluble):
+        gas = NonCondensable(m_gas=0.001, M_gas=28.0, M_vapour=18.0, p_v_vent=9e4, T_vent=96.0, cp_gas=1040.0, soluble=soluble)
+        return run_design("direct_contact", bubble_inputs(gas=gas, pressure=1.01e5, bubble=BubbleData(bubble_diameter=diameter, T_pool=92.0)))
+
+    assert check_state(with_gas(1e-2, "no"), "Bubble radius with non-condensable gas") is CheckState.PASS
+    assert check_state(with_gas(6e-3, "no"), "Bubble radius with non-condensable gas") is CheckState.FAIL
+    assert check_state(with_gas(6e-3, "yes"), "Bubble radius with non-condensable gas") is CheckState.PASS
+
+
+def test_tail_pipe_against_the_published_length():
+    def tail(p_cond):
+        inputs = pool_inputs(barometric="yes", p_atm=1.013e5, pressure=p_cond, vapour=steam(T_sat=33.0, h_fg=2.42e6, rho_v=0.035, m_vapour=1.0), coolant=CoolantStream(T_in=20.0, T_out=28.0, rho=996.0, cp=4180.0))
+        return run_design("direct_contact", inputs)
+
+    result = tail(5e3)
+    assert check_state(result, "Tail pipe against the published length") is CheckState.PASS
+    detail = next(c.detail for c in result.checks if c.name == "Tail pipe against the published length")
+    assert "about 10 m" in detail and "10.36 m" in detail
+    # Pure hydrostatics exceeds 34 ft only for a light liquid: 1.013e5/(700 x 9.81) = 14.75 m.
+    light = pool_inputs(barometric="yes", p_atm=1.013e5, pressure=1e3, vapour=steam(T_sat=33.0, h_fg=2.42e6, rho_v=0.035, m_vapour=1.0), coolant=CoolantStream(T_in=20.0, T_out=28.0, rho=700.0, cp=4180.0))
+    assert check_state(run_design("direct_contact", light), "Tail pipe against the published length") is CheckState.FAIL
+
+
+def test_nomenclature_readings_are_stated():
+    bub = BubbleData(bubble_diameter=1e-2, T_pool=92.0, rise_velocity=0.3, release_frequency=26.0, nozzle_spacing=12.5e-3)
+    result = run_design("direct_contact", bubble_inputs(bubble=bub))
+    note = next(a for a in result.design_basis if a.startswith("HEDH Eqs (87)-(88), symbols"))
+    for text in ("pp. xxi-xxv", "1/s", "U_inf", "Ja*_0", "HSB Eq. 22.44"):
+        assert text in note
+    sheet = run_design("direct_contact", sheet_inputs())
+    assert any("complete utilization" in g and "Re_f" in g for g in sheet.scope_limits)
+
+
+def test_result_wording_is_decisive():
+    banned = ("supplied", "project drive", "replace or confirm", "when it arrives", "not available", "unconfirmed", "should confirm")
+    for inputs in (spray_inputs(), sheet_inputs(), packed_inputs(), bubble_inputs(), pool_inputs(), baffle_inputs()):
+        result = run_design("direct_contact", inputs)
+        text = " ".join(result.design_basis + result.scope_limits + result.warnings + [c.detail for c in result.checks]).lower()
+        assert not [b for b in banned if b in text]
 
 
 def test_every_step_has_formula_and_source():

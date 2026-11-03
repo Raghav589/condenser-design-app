@@ -53,7 +53,7 @@ All are categorical answers. Field names `q1_coolant` to `q14_wide_range_venting
 
 - **Question 11 wording:** the chart box says "Low pressure drop available"; the text says "Is a low-pressure drop required". The horizontal branches only make sense with the text's wording, so that is used.
 - **Question 11 on the vertical side:** both answers lead to question 12, so it doesn't change the outcome there.
-- **Supplied logic:** the project's own selection algorithm was unavailable. Compare it with this table when it arrives.
+- **Design basis:** HSB Fig. 17.1, followed question by question.
 
 ## Tests
 

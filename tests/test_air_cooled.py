@@ -43,10 +43,16 @@ from condenser_app.modules.air_cooled import (
     fin_height,
     fin_psi,
     friction_constant_high_fin,
+    hedh_film_thickness,
     min_flow_area,
     natural_draft_height,
+    noise_table_at_1m,
+    regime_coefficient,
+    regime_of,
     row_duty_fractions,
     row_factor,
+    shear_parameter,
+    sonic_velocity,
     sound_power_level,
     sound_pressure_level,
     total_sound_power_level,
@@ -496,8 +502,170 @@ def test_no_fan_diameter_uses_the_source_range():
     r = run()
     assert r.get("dp_dynamic") == pytest.approx(50.0)
     assert r.get("n_fans") == 1
-    assert check(r, "Face area to fan section").state is CheckState.NOT_ASSESSED
+    assert check(r, "Face area to fan section").state is CheckState.PASS
+    assert "by construction" in check(r, "Face area to fan section").detail
     assert r.get("fan_power") == pytest.approx(r.get("V_air") * (r.get("dp_air_static") + 50.0) / 0.65)
+
+
+def test_noise_reports_a_number_from_the_derived_diameter_and_mid_tip_speed():
+    # Hand check: D from S/S_v = 2.2, the middle of 1.8 to 2.6; w = 48.5, the middle of 46 to 51 m/s (HEDH 4.4.1-6).
+    r = run()
+    D = math.sqrt(4.0 * r.get("S_0") / (2.2 * math.pi))
+    assert r.get("fan_diameter") == pytest.approx(D)
+    assert r.get("tip_speed") == pytest.approx(48.5)
+    v_f = r.get("V_air")
+    assert r.get("l_w") == pytest.approx(sound_power_level(44.0, 48.5, r.get("dp_air_static"), v_f, D))
+    assert r.get("l_1m") == pytest.approx(r.get("l_w") - 10.0 * math.log10(2.0 * math.pi))
+    assert "HEDH 4.4.1-6" in check(r, "Noise").detail
+
+
+def test_noise_table_hand_check_and_hedh_worked_problem():
+    assert noise_table_at_1m(60.0) == 85.0
+    assert noise_table_at_1m(30.0) == 75.0
+    assert noise_table_at_1m(70.0) == 85.0
+    assert noise_table_at_1m(20.0) == 75.0
+    # HEDH 3.8.9's worked problem: w = 55 m/s, L_w = 102 dB(A). Table 8 between 45 m/s (81) and 60 m/s (85): 83.7. Eq. (2) at 1 m: 94.
+    assert noise_table_at_1m(55.0) == pytest.approx(81.0 + 4.0 * 10.0 / 15.0)
+    assert sound_pressure_level(sound_power_level(44.0, 55.0, 110.0, 68.0, 3.65), 1.0) == pytest.approx(94.1, abs=0.1)
+
+
+def test_fan_diameter_and_tip_speed_checks():
+    i = consistent(T_out=40.0)
+    i.fan.fan_diameter, i.fan.tip_speed = 1.0, 70.0
+    r = run(inputs=i)
+    assert check(r, "Fan diameter").state is CheckState.FAIL
+    assert check(r, "Fan tip speed").state is CheckState.FAIL
+    i.fan.fan_diameter, i.fan.tip_speed = 3.0, 50.0
+    r = run(inputs=i)
+    assert check(r, "Fan diameter").state is CheckState.PASS
+    assert check(r, "Fan tip speed").state is CheckState.PASS
+    assert r.get("fan_diameter") == 3.0 and r.get("tip_speed") == 50.0
+
+
+def test_large_face_area_splits_the_fans_to_stay_within_the_diameter_range():
+    i = consistent(T_out=40.0)
+    i.stream.m_dot = 40.0
+    i.geometry.n_t = 400
+    r = run(inputs=i)
+    n = r.get("n_fans")
+    assert n > 1
+    assert r.get("fan_diameter") <= 4.1 + 1e-9
+    assert math.sqrt(4.0 * r.get("S_0") / ((n - 1) * 2.2 * math.pi)) > 4.1
+
+
+def test_motor_margin_check():
+    i = consistent(T_out=40.0)
+    assert check(run(inputs=i), "Motor margin").state is CheckState.PASS
+    power = run(inputs=i).get("fan_power")
+    i.fan.motor_power = 1.20 * power
+    assert check(run(inputs=i), "Motor margin").state is CheckState.FAIL  # fixed blades: 25-30%
+    i.fan.blade_control = "seasonal"
+    assert check(run(inputs=i), "Motor margin").state is CheckState.PASS  # reset blades: 15%
+    i.fan.blade_control = "autovariable"
+    assert check(run(inputs=i), "Motor margin").state is CheckState.NOT_ASSESSED
+
+
+# --------------------------------------------------------------------------------- regime criteria, HEDH 3.4.6 B
+def test_shear_parameter_hand_check():
+    # Re_l = 1000: s+ = (1000/2)^(1/2) = 22.36. tau = 1, rho_l = 582.9, eta_l = 159e-6: s = 22.36 (159e-6)/(582.9)^(1/2) = 1.4726e-4 m.
+    s = hedh_film_thickness(1000.0, 1.0, 582.9, 159e-6)
+    assert s == pytest.approx(math.sqrt(500.0) * 159e-6 / math.sqrt(582.9))
+    # Above Re_l = 1250: s+ = 0.0504 Re^(7/8).
+    assert hedh_film_thickness(2000.0, 1.0, 582.9, 159e-6) == pytest.approx(0.0504 * 2000.0**0.875 * 159e-6 / math.sqrt(582.9))
+    fluid = example().fluid
+    assert shear_parameter(fluid, 1000.0, 1.0) == pytest.approx(1.0 / ((fluid.rho_l - fluid.rho_v) * 9.81 * hedh_film_thickness(1000.0, 1.0, fluid.rho_l, fluid.mu_l)), rel=1e-3)
+
+
+@pytest.mark.parametrize("value,limits,expected", [
+    (5.0, (5.0, 29.0), "no-shear"), (29.0, (5.0, 29.0), "shear"), (10.0, (5.0, 29.0), "transition"),
+    (0.5, (0.5, 1.5), "no-shear"), (1.5, (0.5, 1.5), "shear"), (1.0, (0.5, 1.5), "transition"),
+])
+def test_regime_limits(value, limits, expected):
+    assert regime_of(value, limits) == expected
+
+
+def test_regime_rule_takes_each_limit_and_interpolates():
+    assert regime_coefficient(2.0, 800.0, 1500.0) == 800.0
+    assert regime_coefficient(0.3, 800.0, 1500.0) == 1500.0
+    assert regime_coefficient(1.0, 800.0, 1500.0) == pytest.approx(1150.0)
+
+
+def regime_rows(result):
+    return next(c for c in result.convergence if c.name.startswith("Tube-side regime")).rows
+
+
+def test_regime_table_along_the_tube():
+    r = run()  # Ex. 19.2: m = 46 kg/m2.s
+    fluid = example().fluid
+    c = 46.0 / math.sqrt(9.81 * 18.6e-3 * fluid.rho_v * (fluid.rho_l - fluid.rho_v))
+    assert r.get("x_shear_limit") == pytest.approx(1.5 / c, rel=1e-3)
+    assert r.get("x_no_shear_limit") == pytest.approx(0.5 / c, rel=1e-3)
+    rows = regime_rows(r)
+    assert len(rows) == 10
+    for row in rows:
+        assert row[1] == pytest.approx(c * row[0], rel=1e-3)
+        assert row[3] == regime_of(row[1], (0.5, 1.5))
+        assert row[4] == regime_of(row[2], (5.0, 29.0))
+        assert row[3] in row[5]
+    assert rows[-1][3] == "no-shear" and "does not apply" in rows[-1][5]
+    assert r.get("alpha_i_regime_rule") > 0
+
+
+def test_method_choice_is_reported_against_the_regime():
+    # Ex. 19.2's Boyko-Kruzhilin runs into no-shear stations at the low-quality end; Eq. 16.56 holds through all of them.
+    assert check(run(), "Tube-side method fits the regime along the tube").state is CheckState.FAIL
+    r = run(inputs=consistent(T_out=40.0))
+    assert check(r, "Tube-side method fits the regime along the tube").state is CheckState.PASS
+    assert any("HEDH 3.4.6 B" in a and "Eq. 16.56" in a for a in r.design_basis)
+    assert r.get("L_cross_check") > r.get("L")  # the method spread stays a reported fact
+
+
+def test_regime_table_without_surface_tension_keeps_j_g():
+    i = example()
+    i.fluid = replace(i.fluid, sigma=None)
+    r = run(inputs=i)
+    rows = regime_rows(r)
+    assert rows[0][1] > rows[-1][1] and rows[0][2] is None
+
+
+# --------------------------------------------------------------------------------- vacuum, HEDH 3.8.9 B
+def test_sonic_limit_hand_check():
+    # c = (gamma P/rho)^(1/2). 3000 Pa, 6.36 kg/m3: 21.72 m/s. v_in = 46 (0.85)/6.36 = 6.15 m/s, below 50% of c.
+    assert sonic_velocity(3000.0, 6.36) == pytest.approx(21.72, abs=0.01)
+    assert sonic_velocity(3000.0, 6.36, 1.4) > sonic_velocity(3000.0, 6.36)
+    i = example()
+    i.stream.pressure = 3000.0
+    r = run(inputs=i)
+    assert r.get("v_vapour_inlet") == pytest.approx(step(r, "m") * 0.85 / i.fluid.rho_v)
+    assert r.get("sonic_velocity") == pytest.approx(sonic_velocity(3000.0, i.fluid.rho_v))
+    assert check(r, "Sonic limit at the tube inlet").state is CheckState.PASS
+    assert check(r, "Vacuum limit").state is CheckState.FAIL
+    i.stream.pressure = 300.0
+    r = run(inputs=i)
+    assert check(r, "Sonic limit at the tube inlet").state is CheckState.FAIL
+    assert any("short tubes" in w for w in r.warnings)
+    i.stream.pressure = 1e5
+    assert check(run(inputs=i), "Vacuum limit").state is CheckState.PASS
+
+
+def test_vacuum_checks_need_the_pressure():
+    r = run()
+    assert check(r, "Vacuum limit").state is CheckState.NOT_ASSESSED
+    assert not any(c.name == "Sonic limit at the tube inlet" for c in r.checks)
+
+
+def test_api_661_values_are_guidance_citing_the_edition():
+    detail = check(run(), "API 661 and other air-cooled exchanger standards").detail
+    for text in ("2nd ed.", "0.5%", "19 mm", "9.5 mm", "1.9 mm", "1.5 mm", "2.7 mm", "6.4 mm", "no compliance is claimed"):
+        assert text in detail
+
+
+def test_result_wording_is_decisive():
+    banned = ("supplied", "project drive", "replace or confirm", "when it arrives", "not available", "unconfirmed", "should confirm")
+    for inputs in (example(), consistent(T_out=40.0)):
+        r = run(inputs=inputs)
+        text = " ".join(r.design_basis + r.scope_limits + r.warnings + [c.detail for c in r.checks]).lower()
+        assert not [b for b in banned if b in text]
 
 
 def test_natural_draft_height():
@@ -552,9 +720,9 @@ def test_codes_are_not_assessed_and_no_compliance_claimed():
 def test_traceability():
     r = run(inputs=consistent(T_out=40.0))
     assert all(s.formula and s.substitution for s in r.steps)
-    assert any("Why the length iterates" in a for a in r.assumptions)
-    assert any("F = 1" in a for a in r.assumptions)
-    assert any("BENCHMARKS EXTEND" in g for g in r.source_gaps)
+    assert any("Why the length iterates" in a for a in r.design_basis)
+    assert any("F = 1" in a for a in r.design_basis)
+    assert any("BENCHMARKS EXTEND" in g for g in r.scope_limits)
     assert {Category.THERMAL, Category.HYDRAULIC, Category.GEOMETRIC, Category.MECHANICAL} <= {s.category for s in r.steps}
     assert r.convergence[0].columns and r.convergence[0].rows
 
@@ -597,7 +765,6 @@ def test_missing_required_value():
     (lambda i: setattr(i.geometry, "n_t", None), "Tubes per row"),
     (lambda i: setattr(i.geometry, "n_t", 20.5), "whole number"),
     (lambda i: setattr(i.fan, "hub_diameter", 0.5), "hub diameter"),
-    (lambda i: setattr(i.fan, "tip_speed", 40.0), "tip speed"),
 ])
 def test_invalid_values(mutate, text):
     assert text in issues(mutate)
@@ -625,7 +792,7 @@ def test_boyko_kruzhilin_without_sigma_falls_back_as_the_source_says():
     assert r.status is Status.OK_WITH_WARNINGS
     assert r.get("L") == pytest.approx(2.62, rel=BOOK)
     assert r.get("dp_tube_friction") > 0.0  # Chisholm, HSB Sec. 10.5
-    assert any("cross-check was not computed" in g for g in r.source_gaps)
+    assert any("cross-check was not computed" in g for g in r.scope_limits)
 
 
 def test_non_convergence_reports_with_its_history():

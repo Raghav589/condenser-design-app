@@ -2,7 +2,7 @@
 
 `condenser_app/modules/air_cooled.py` (key `air_cooled`). Tests: `tests/test_air_cooled.py`.
 
-Equations were read from page images. Keys: **HSB** Hewitt, Shires & Bott; **HEDH** Heat Exchanger Design Handbook. The supplied project algorithm is not available, so this is the approximate design of HSB Sec. 19.4 with averaged tube-side conditions. HSB says accurate design needs a multidimensional code such as ACOL.
+Equations were read from page images. Keys: **HSB** Hewitt, Shires & Bott; **HEDH** Heat Exchanger Design Handbook. Design basis: the approximate design of HSB Sec. 19.4 with averaged tube-side conditions, because it is the published method for this exchanger. HSB says accurate design needs a multidimensional code such as ACOL. No book has a complete vertical downflow air-cooled worked example.
 
 ## How far the benchmarks extend
 
@@ -38,13 +38,25 @@ What vertical downflow changes, and the input that carries it:
 | 10 | Tube dp: friction + momentum + static, x(z) from `dz` proportional to `dx/U(x)` | Eqs. 10.27, 10.26, 10.49; Sec. 18.4.1 | hydraulic |
 | 11 | Air dp, static pressure | Eqs. 2.221, 2.222, 2.252; HEDH 3.8.6 | hydraulic |
 | 12 | Fan volume at the fan's density, number of fans, dynamic pressure, power, motor; or tower height | HEDH 3.8.7, 3.8.8; Eq. 19.1 | hydraulic, mechanical |
-| 13 | Noise, if diameter and tip speed are given | Eqs. 19.2, 19.3; HEDH 3.8.9 | mechanical |
+| 13 | Noise, always. Diameter not entered: from the area rule at S/S_v = 2.2. Tip speed not entered: 48.5 m/s, the middle of 46-51 m/s | Eqs. 19.2; HEDH 3.8.9, 3.8.7 Eq. (1), 4.4.1-6 | mechanical |
 | 14 | Row duty split and uniform-feed row outlet quality | Derived; Secs. 17.3.2, 19.5.1 | thermal |
-| 15 | Checks | below | all |
+| 15 | Regime and applicable method at 10 stations along the tube: j_g*, F | HEDH 3.4.6 B, 2.6.2 | thermal |
+| 16 | Sonic limit at the tube inlet, when the pressure is entered | HEDH 3.8.9 B | hydraulic |
+| 17 | Checks | below | all |
 
 **F = 1.** "Because the condensation is at nearly constant temperature (pure vapor), the value of F is unity" (Ex. 19.1). HEDH 3.8.5 I: for isothermal condensation tau = 0, so all flow arrangements give the same Phi_air. Its Eq. (7) or (10) at tau = 0 is `P = 1 - exp(-NTU)`. So rows and passes do not enter dT_LM. The only possible cross is `T_out >= T_sat`, rejected in `validate`; a pressure drop that lowers T_sat would break F = 1, which is why it is reported as a check.
 
-**Choice of tube-side method.** `vertical_downflow` is the default: HSB Sec. 16.3.3 gives Eq. 16.56 for downflow, it tends to the right limit at each end, and it carries the gravity term. Ex. 19.2 uses Boyko-Kruzhilin "for simplicity", and HSB gives that form "a much weaker fundamental basis". `example_inputs()` selects Boyko-Kruzhilin to reproduce the book. The other is always reported, with its U and length.
+**Choice of tube-side method.** `vertical_downflow` is the default. Reason: HEDH 3.4.6 B's criteria show the regime changing along the tube as the vapour condenses, and Eq. 16.56 (HSB Sec. 16.3.3) tends to the right coefficient in both the shear and the no-shear limit, so it holds at every station. Boyko-Kruzhilin has no gravity term, so it does not apply at a no-shear station, and HSB gives it "a much weaker fundamental basis". Ex. 19.2 uses it "for simplicity", and `example_inputs()` selects it to reproduce the book. The other is always reported, with its U and length.
+
+**Regime along the tube, HEDH 3.4.6 B.** At each of 10 stations:
+
+- `j_g* = m x/[g D rho_G (rho_L - rho_G)]^(1/2)`, Eq. (2): annular at or above 1.5, stratified or no-shear at or below 0.5 (Breber et al.). It also gives the limiting qualities directly, `x = 1.5/C` and `x = 0.5/C`.
+- `F = tau_w/[(rho_L - rho_G) g s]`, Eq. (1), with `s = s+ eta_L/(rho_L tau_w)^(1/2)`, `s+ = (Re_L/2)^(1/2)` below 1250, `0.0504 Re_L^(7/8)` above, Eqs. (3)-(6): shear at or above 29, no-shear at or below 5 (Jaster and Kosky).
+- HEDH: "either of these equations may be used". j_g* decides the station here, because HEDH reports it fits the data better and it gives the limits directly. F is reported beside it. tau_w is the Friedel wall shear the film term uses; HEDH's route is the Martinelli relation, Eqs. (7)-(10).
+- Method at the station: shear, HEDH Eqs. (11)-(14); no-shear, the gravity film, HEDH Eqs. (17)-(19), which are the alpha_grav branches; transition, linear between them (HEDH 2.6.2 Eq. 80). These limits come from horizontal-tube work, and HEDH 3.4.6 B states "it is assumed that the same criteria apply" to vertical downflow.
+- The check `Tube-side method fits the regime along the tube` fails for Boyko-Kruzhilin if any station is no-shear. The mean coefficient by this rule is output as `alpha_i_regime_rule`.
+
+For the Ex. 19.2 bundle at m = 46 kg/m2.s: j_g* = 1.78 x, so no station reaches shear control, x = 0.84 is the shear limit, and below x = 0.28 the flow is no-shear. F stays between 0.04 and 1.4, which is no-shear at every station. The two criteria differ on the transition band and agree that gravity is not negligible.
 
 From the library's judgement calls: the suction correction, Eq. 16.76, is an input and off by default (lower, conservative); Chen is the reported sensitivity (1839 W/m2.K here); the mean is area-weighted.
 
@@ -72,6 +84,8 @@ dp = (K_a + n_r K_f) rho v_max^2/2,  K_a = 1 + sigma^2                          
 K_f = 4.567 Re^-0.242 (A/A_T)^0.504 (p_1/D_r)^-0.376 (p_2/D_r)^-0.546                                         (2.252)
 N = V (dp_stat + dp_dyn)/eta,  dp_dyn = (V_f/S_VE)^2 rho/2,  1.8 < S/S_v < 2.6                                (HEDH 3.8.7 Eqs. 1-3)
 L_w = c + 30 log w + 10 log(dp_stat V_f/1000) - 5 log D;  (L_w)_n = L_w + 10 log n;  L_p = L_w - 10 log(2 pi R^2)   (HEDH 3.8.9 Eqs. 1-3)
+j_g* = m x/[g D rho_G (rho_L - rho_G)]^(1/2);  F = tau_w/[(rho_L - rho_G) g s]                                (HEDH 3.4.6 Eqs. 1-6)
+c = (gamma P/rho_G)^(1/2), ideal gas, not printed;  v_in = m x_in/rho_G <= 0.5 c for sharp-edged tubes         (HEDH 3.8.9 B)
 H_eff = (dp_tow + dp_stat)/(d_rho g)                                                                          (HEDH 3.8.8 Eq. 1)
 q_k share = exp(-NTU (k-1)/n) (1 - exp(-NTU/n))/(1 - exp(-NTU))                                               (derived, not printed)
 ```
@@ -97,6 +111,8 @@ Tube side: see `condensation_library.md`.
 | sin(alpha) | `-sin(tube_side.tube_angle)` | - |
 | D_v, D_N, eta_v | `fan.fan_diameter`, `.hub_diameter`, `.efficiency` | m, - |
 | c, w (noise), R | `fan.noise_design`, `.tip_speed`, `.noise_distance` | dB(A), m/s, m |
+| N_mot | `fan.motor_power` (entered) or output `motor_power` (sized) | W |
+| P, gamma | `stream.pressure`, `.gamma` | Pa, - |
 
 ## Benchmark table
 
@@ -166,14 +182,15 @@ The module reproduces the book through the `outlet_and_velocity_hsb_ex19_2` choi
 | Eq. 16.56, Butterworth shear | 2076 | 629 | 2.04 |
 | Eq. 16.56, Kosky-Staub shear (default) | 2137 | 640 | 2.01 |
 | same, with suction correction | 2234 | 657 | 1.95 |
+| HEDH 3.4.6 B regime rule, Kosky-Staub shear (output `alpha_i_regime_rule`, not a design method here) | 1711 | | |
 
-The factor of two is the gravity term: at m = 46 kg/m2.s the shear is small (tau 0.24 to 1.1 N/m2) and most of the tube has Re_f > 1600, where alpha_grav is about 1500 to 1900. This is real physics that the book's example omits, **but neither number is verified**:
+The factor of two is the gravity term: at m = 46 kg/m2.s the shear is small (tau 0.24 to 1.1 N/m2) and most of the tube has Re_f > 1600, where alpha_grav is about 1500 to 1900. The regime criteria above say the same thing: this is real physics that the book's example omits. Limits on these numbers, stated plainly:
 
 - HSB works no example of Eq. 16.56.
 - `delta rho_L g/tau` is 0.8 to 27, so the gravity-negligible assumption of the Kosky-Staub term does not hold.
 - alpha_grav jumps by a factor of two at Re_f = 1600 for this Pr (library note; HEDH 2.6.2 Fig. 5), and the mean is sensitive to it.
 
-Treat the spread as the design uncertainty on the tube side until the project's own example is available.
+The default is Eq. 16.56. The spread between the methods is reported with every design as the tube-side uncertainty.
 
 **Air-side dominance.** HSB Sec. 19.4 justifies averaging because the air side often dominates. In Ex. 19.2 it is only 36% of the resistance, and the module's check fails there. In the default vertical case with the balance closed it is 55%.
 
@@ -184,7 +201,7 @@ Treat the spread as the design uncertainty on the tube side until the project's 
 Each shown from the book's own numbers or dimensions. Issues already listed in `condensation_library.md` are not repeated.
 
 1. **Eq. 2.229 and Fig. 2.49: the test for the diagonal plane is backwards.** They use the diagonal when `p_1 < 2 p_3 - B`. Eq. 2.230 is smaller than Eq. 2.228 when `p_1 > 2 p_3 - B`. As printed, Ex. 9.1 (60.33 < 89.4) would use 3.50 m2, while it uses the smaller 1.760 m2. Code takes the smaller area.
-2. **Eq. 19.3 prints `L_w + 10 log 2 pi R^2`**, so the level would rise with distance. HEDH Eq. (2) and its worked problem subtract; code subtracts. HSB also prints "decibels per ampere" for dB(A).
+2. **Eq. 19.3 prints `L_w + 10 log 2 pi R^2`**, so the level would rise with distance. HEDH Eq. (2) and its worked problem subtract; code subtracts. HSB also prints "decibels per ampere" for dB(A). The `- 5 log D` term of the sound power equation has the same sign in both books (HSB Eq. 19.2; HEDH 3.8.9 Eq. 1).
 3. **Ex. 2.11**: A_F prints `D_r w` for the `D_f w` of Eq. 2.225 and gives 2.542 m2, a value even that form does not give (3.09). The total 3.092 m2 should be 3.778 m2 (A/A_T 4.58, not 3.75). Its K_f note of 0.50 and its heat rate carry this. It also prints D_r = 1.64e2 and s = 2.0e-2 m.
 4. **Ex. 9.1 quotes Eq. 2.244 with Re^0.688** and substitutes `(1.68e6)^0.658`. Eq. 2.244, Ex. 2.11 and its own 68.26 need `Re^0.658` and 1.68e4.
 5. **Ex. 9.1 says k_fin = 205** but calculates with 206 (0.839 needs 206; 205 gives 0.842). The example uses 206. Other misprints there: `(57.2)^1` in A_F, the alpha_a unit W/(m.K), Fig. 9.18 "D_r = 25.4 m" and n_r labelled "tubes in a row", `(eta/4)` in v_w, "Chapter 13" for Chapter 3.
@@ -193,19 +210,22 @@ Each shown from the book's own numbers or dimensions. Issues already listed in `
 8. **Ex. 19.1, 19.2**: `(62 - 152)` for (62 - 15); Q written with `(x_out - x_in)`; `1 x x_in` and `1 - x_out` in the alpha formulae; `19^-5` for 10^-5; dT 32.90 against 32.93; 62 degC for 335 K. Ex. 19.1 takes U from a table for 50 mm fins while using the 57.2 mm bundle.
 9. **HEDH 3.8.5 Eq. (9)** prints `1 - e^(NTU/2)`, negative as written. Not used. **HEDH's worked problem** has dp_dyn = 30 Pa against its own 40 to 60 Pa, so the range is a guide.
 
-## Gaps, and what the project drive should confirm
+## Scope and stated choices
 
+- **Worked example.** No book has a complete vertical downflow air-cooled example. The benchmarks above state how far they reach.
+- **Air specification.** The closed balance is the design path. Ex. 19.2's two independent inputs are kept only to reproduce the book.
 - **Vent position is not settled by the sources.** HSB Sec. 19.3.1 has incondensables leaving by the bottom manifold; its Fig. 19.7 draws the vent on the top header. Lecture 23's water-cooled vertical downflow unit has both a tubesheet vent at the top and a vapour vent at the bottom. Reported NOT_ASSESSED.
 - **Lecture material.** Lecture 23 (requirements slide) says freezing of the condensate is often a problem, and that in cold countries the air is often preheated in the air condenser in winter. Its other remedy, the shell side, is not open to an in-tube air-cooled unit. This and its statements on venting and condensate control are words only, with no criterion or calculation, so they go into the checks. Lecture 24 treats shell-and-tube condensers, and Lecture 18 surveys compact surfaces; neither has an air-cooled calculation. Lectures 19 and 20 give plate-fin j and f methods and cross-flow theory, not used for round high fins; Lecture 20's `eta_o` equals HSB Eq. 2.235. Lecture 19's fin-tube chart is not legible at the resolution viewed and is not used. All of Lectures 18, 20, 23 and 24 were viewed as images, and Lecture 19 pages 3 to 11. Kays and London was not opened; K_a comes through HSB.
-- **No method in the sources**, so NOT_ASSESSED or left out: condensate backup, subcooling, vent placement, gas blanketing, air and two-phase maldistribution, tube-side headers and entry loss, the sonic limit (no speed of sound), plenum depth, fan-off exchange rate (HEDH 3.8.7 F).
+- **No method in the books**, so NOT_ASSESSED or outside this module's scope: condensate backup, subcooling, vent placement, gas blanketing, air and two-phase maldistribution, tube-side headers and entry loss, plenum depth, fan-off exchange rate (HEDH 3.8.7 F).
+- **Sonic limit.** HEDH 3.8.9 B states the limit and gives no formula for the speed of sound. The module uses the ideal-gas `c = (gamma P/rho_G)^(1/2)`, with `gamma = 1` when empty: the isothermal value, the lowest c, so the stricter check. It checks `v_in` against 50% of c, the low end of HEDH's 50-60% for sharp-edged tubes. Below 30 torr with the limit exceeded and L above 2 m, it warns that HEDH asks for short tubes of 1.0 or 2.0 m. No absolute lower pressure limit is stated in the books.
 - **Row table is an indicator.** It assumes equal vapour feed and one U. HSB Sec. 19.4 says row pressure drops rebalance the flow. It uses air mixed between rows, and it is derived, not printed. Total condensation (x_out = 0) always fails it, which is what Rozenman and Pundyk describe (about 16% undersized).
 - **Inclined tubes.** `g sin(theta)` in the film is HSB's flat-surface statement (below Eq. 16.14); the film in an inclined tube is not uniform. Friedel's downflow form is not in the sources.
-- **Fans.** S_VE is undefined in HEDH; the annulus is inferred from its 30 Pa. With no fan section, dp_dyn is the 50 Pa middle of its range. The motor margin for fixed blades uses 30% from HEDH's 25-30%. Fan charts are not digitised.
+- **Fans.** The PDF leaves S_VE undefined; the module reads it as the annulus outside the hub, which gives the 30 Pa of HEDH's worked problem. With no fan section, dp_dyn is the 50 Pa middle of its range. A motor sized here for fixed blades uses 30%, the top of HEDH's 25-30%; an entered motor is checked against 25%, or 15% with reset blades. HEDH 3.8.7 Fig. 1 is a chart for one fan (3.65 m, 288 rpm), so it is not applied to other fans. No book has a fan efficiency chart: efficiency is an input, often 0.6-0.7.
+- **Noise.** The derived diameter and mid tip speed let noise report a number, and each is labelled with its source in the output and the check. There is no regulatory limit in the books. HEDH 4.8.3 Table 8 gives indicative maxima 1 m from a fan (60 m/s 85, 45 m/s 81, 35 m/s 77, 30 m/s 75 dBA), read linearly between rows. The comparison is a guide: Eq. (2) spreads from a point, and HEDH's own worked problem gives 94 dB(A) by this route against about 84 dBA, so the check fails on that case too.
 - **Natural draft.** Height for the chosen air flow only. Tower loss defaults to the bundle loss, which HEDH says it "often reaches". Not a coupled solution.
 - **Module's own numbers, not from a source:** the 5% band on air density, `delta/D_i < 0.5` for the thin film, "more than half" for air-side dominance.
-- **Standards.** API 661 and the ASME VIII family are not available and are NOT_ASSESSED. No compliance is claimed.
-- **Not implemented:** superheat, non-condensables and mixtures (warning only), reflux section, several tube passes, in-line high fins (no K_f in the sources), tapered fins (Eq. 2.249), low-fin Eqs. 2.240 and 2.251.
-- **Confirm first against the project drive:** the air specification expected (Ex. 19.2's two inputs or a closed balance), whether the supplied algorithm uses Eq. 16.56 or Boyko-Kruzhilin, the fan and API rules, and whether a worked vertical downflow example exists.
+- **Standards.** Outside this module's scope, NOT_ASSESSED, and no compliance is claimed. The check lists as guidance the API 661 values HEDH 4.4.1 quotes from the 2nd edition (1978): tip clearance no greater than 0.5% of the fan diameter, limits 19 and 9.5 mm; plenum panels at least 1.9 mm flat or 1.5 mm ribbed; fan decks at least 2.7 mm; floor plates at least 6.4 mm. Header, tube thickness and plug design are also outside the scope: the books give practice, not design rules.
+- **Outside this module's scope:** superheat, non-condensables and mixtures (warning only), reflux section, several tube passes, in-line high fins (no K_f in the books), tapered fins (Eq. 2.249), low-fin Eqs. 2.240 and 2.251.
 
 ## Checks
 
@@ -220,7 +240,12 @@ Each shown from the book's own numbers or dimensions. Issues already listed in `
 | Blasius; film; regimes; gravity to shear | Re_LO >= 2000; delta/D_i < 0.5; reported | Library | thermal, hydraulic |
 | Inclination and drainage | angle > 0, vapour at top | Secs. 17.3.2, 19.3.4, 19.3.5 | hydraulic |
 | Row maldistribution | row x_out >= 0 | Secs. 19.4, 19.5.1 | thermal |
+| Method fits the regime | Boyko-Kruzhilin: no no-shear station. Eq. 16.56: holds at all, counts reported | HEDH 3.4.6 B | thermal |
 | Fan static; S/S_v; dp_dyn; N/Q; eta | <= 200 Pa; 1.8-2.6; 40-60 Pa; 1-3%; 0.6-0.7 | HEDH 3.8.5, 3.8.7; Eq. 19.1 | hydraulic, geometric |
+| Fan diameter; tip speed | 1.8-4.1 m; <= 61 m/s, average 46-51 m/s | HEDH 4.4.1-6 | geometric, mechanical |
+| Motor margin | >= 25% fixed blades, >= 15% reset blades; none stated for autovariable | HEDH 3.8.7 C | mechanical |
+| Noise at 1 m | L_p(1 m) <= HEDH Table 8 at the tip speed, a guide | HEDH 4.8.3; 3.8.9 Eq. (2) | mechanical |
 | Fin contact | T_sat <= 100 degC or R_c entered | Sec. 9.3.3; HEDH 3.8.3 | thermal |
 | Freezing | T_air,min > T_freeze, else NOT_ASSESSED | Lecture 23; Sec. 19.5.1; HEDH 3.8.9 C | mechanical |
-| Vacuum | warning below 30 torr | HEDH 3.8.9 B | hydraulic |
+| Vacuum limit | P >= 30 torr, with a warning below; NOT_ASSESSED with no pressure | HEDH 3.8.9 B | hydraulic |
+| Sonic limit at the tube inlet | v_in <= 0.5 c, sharp-edged tubes | HEDH 3.8.9 B; c ideal gas | hydraulic |

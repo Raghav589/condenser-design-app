@@ -188,12 +188,9 @@ class SelectionModule(CondenserModule):
 
     def design(self, inputs: SelectionInputs) -> DesignResult:
         r = DesignResult(module=self.key, title=self.title, references=cite("HSB", "ME6220-L"))
-        r.assumptions.append("The chart gives broad guidance and does not replace design experience or an economic comparison (HSB Sec. 17.2).")
-        r.source_gaps.append(
-            "The project's supplied selection algorithm and data-entry sheet were not available. This module follows HSB Fig. 17.1; "
-            "replace or confirm it when the project drive is added."
-        )
-        r.source_gaps.append(
+        r.design_basis.append("The chart gives broad guidance and does not replace design experience or an economic comparison (HSB Sec. 17.2).")
+        r.design_basis.append("Design basis: HSB Fig. 17.1, the published selection chart, followed question by question.")
+        r.scope_limits.append(
             "Question 11: the chart box says 'Low pressure drop available' while the text says 'required'. The text's wording is used. "
             "On the vertical side of the chart both answers lead to question 12, so it does not change that outcome."
         )

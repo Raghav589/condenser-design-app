@@ -4,7 +4,7 @@ Three people, one repository, one application. `main` always holds the integrate
 
 ## Who owns what
 
-This split keeps people in separate files. The brief's section 5 did not come through, so **this allocation is a proposal: change it to match your team.**
+This split keeps people in separate files.
 
 | Member | Owns | Files |
 |---|---|---|
@@ -26,10 +26,10 @@ This split keeps people in separate files. The brief's section 5 did not come th
 ## Engineering rules
 
 - Every equation, constant and table value names its source (book and section or equation, or lecture number). Nothing from memory.
-- If a source has no procedure for a step, record it in `result.source_gaps` or require the value as an input. Do not fill the gap with a guess.
+- If a source has no procedure for a step, record it in `result.scope_limits` or require the value as an input. Do not fill the gap with a guess.
 - Benchmark answers belong in tests, never in engineering code. Do not tune a calculation to match a book; find out why it differs and document it.
 - Report tests as passing only after actually running them.
-- Do not claim code compliance. A check that needs a standard we lack is recorded as "not assessed".
+- Do not claim code compliance. A check with no usable procedure in the books is recorded as "not assessed".
 - Do not commit textbooks, standards or slides. `.gitignore` blocks common formats; keep them outside the repository or in `references/`.
 
 ## Showing the working
@@ -38,18 +38,16 @@ Results are meant to be followed, so:
 
 - Every `result.step` is a full chain: `formula` holds the symbols and `substitution` the numbers. Never name a correlation without writing it.
 - Record each validity check where the correlation is used, with its criterion: `result.check("Dittus-Boelter range", ok, "Re = 18500 > 1e4; 0.7 <= Pr = 3.58 <= 160; L/D = 200 > 60")`.
-- When choosing between alternatives, say why, in the step label or `result.assumptions`.
+- When choosing between alternatives, say why, in the step label or `result.design_basis`.
 - Run iterations through `common.iteration`, and state why it iterates, the first guess, the update rule and the stopping rule.
 - Read equations from page images, because OCR garbles them. Check a book's arithmetic before trusting a discrepancy either way.
 - After changing inputs, run `python tools/generate_variable_map.py`.
 
 ## Git commands
 
-Replace the placeholders with your repository details.
-
 ```bash
-git clone <REPOSITORY_URL>
-cd <REPOSITORY_FOLDER>
+git clone https://github.com/Raghav589/condenser-design-app.git
+cd condenser-design-app
 python -m venv .venv
 ```
 
@@ -93,18 +91,6 @@ git fetch origin
 git merge origin/main
 python -m pytest -q
 git push
-```
-
-## First push of the repository
-
-Once, by whoever creates the GitHub repository. Create it empty on GitHub and make it private until you have confirmed nothing restricted is included.
-
-```bash
-git add .
-git status
-git commit -m "Initial integrated condenser design application"
-git remote add origin <REPOSITORY_URL>
-git push -u origin main
 ```
 
 Read the `git status` output before committing and confirm no PDFs or slides are listed.

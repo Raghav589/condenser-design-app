@@ -17,7 +17,7 @@ from condenser_app.service import available_modules, get_module, run_design
 st.set_page_config(page_title="Condenser Design", layout="wide")
 
 HOME = "Home"
-ABOUT = "Sources and limits"
+ABOUT = "Sources and scope"
 NOT_SET = "(not set)"
 
 
@@ -183,7 +183,7 @@ def _show_results(module_key: str, result: DesignResult, inputs) -> None:
                 st.line_chart(pd.DataFrame({"value": c.history}))
 
     with notes:
-        for title, items in (("Assumptions", result.assumptions), ("Source gaps", result.source_gaps), ("References", result.references)):
+        for title, items in (("Design basis", result.design_basis), ("Scope limits", result.scope_limits), ("References", result.references)):
             if items:
                 st.markdown(f"**{title}**")
                 for item in items:
@@ -219,7 +219,7 @@ def _design_link(result: DesignResult) -> None:
         outcome = next(q.value for q in result.outputs if q.key == "recommended_type")
         st.button(f"Design this condenser: {modules[target]}", type="primary", on_click=_go_to_design, args=(target, outcome))
     elif target != "none":
-        st.info(f"The design module '{target}' is not available yet.")
+        st.info(f"This application has no design module for '{target}'.")
 
 
 # ------------------------------------------------------------------ pages
@@ -233,10 +233,7 @@ def page_home() -> None:
     modules = available_modules()
     for key, title in modules.items():
         st.button(title, key=f"home:{key}", on_click=_go_to, args=(title,), help=get_module(key).description)
-    st.warning(
-        "The project's supplied algorithms, data-entry sheets, numerical examples and standards were not available when this was built. "
-        "The modules follow the ME6220 lectures, Hewitt, Shires & Bott and the Heat Exchanger Design Handbook. See 'Sources and limits'."
-    )
+    st.info("The modules follow the ME6220 lectures, Hewitt, Shires & Bott and the Heat Exchanger Design Handbook. See 'Sources and scope'.")
     st.caption(DISCLAIMER)
 
 
@@ -265,12 +262,12 @@ def page_module(module_key: str) -> None:
 
 
 def page_about() -> None:
-    st.title("Sources and limits")
-    readme = Path(__file__).parent / "docs" / "gaps_and_assumptions.md"
+    st.title("Sources and scope")
+    readme = Path(__file__).parent / "docs" / "sources_and_scope.md"
     if readme.exists():
         st.markdown(readme.read_text(encoding="utf-8"))
     else:
-        st.info("docs/gaps_and_assumptions.md is not present.")
+        st.info("docs/sources_and_scope.md is not present.")
 
 
 # ------------------------------------------------------------------ navigation

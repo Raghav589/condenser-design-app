@@ -16,8 +16,8 @@ from .common.units import convert
 from .schemas import Category, CheckState, DesignResult, Status, iter_inputs
 
 DISCLAIMER = (
-    "Preliminary design for coursework. Mechanical design and code compliance (ASME, TEMA, HEI, ISO) are not established "
-    "by this report and need qualified engineering review against the applicable edition."
+    "Preliminary design for coursework. Any mechanical sizing shown is a screening calculation from HEDH Part 4. Code compliance "
+    "(ASME, TEMA, HEI, ISO) is not established by this report and needs qualified engineering review against the applicable edition."
 )
 STATUS_TEXT = {
     Status.OK: "Completed with no warnings or failed checks",
@@ -55,8 +55,8 @@ def _frames(result: DesignResult, inputs: Any) -> dict[str, pd.DataFrame]:
     checks = [{"Category": c.category.value, "Check": c.name, "State": c.state.value, "Detail": c.detail, "Source": c.source} for c in result.checks]
     notes = (
         [{"Type": "Warning", "Note": n} for n in result.warnings]
-        + [{"Type": "Assumption", "Note": n} for n in result.assumptions]
-        + [{"Type": "Source gap", "Note": n} for n in result.source_gaps]
+        + [{"Type": "Design basis", "Note": n} for n in result.design_basis]
+        + [{"Type": "Scope limit", "Note": n} for n in result.scope_limits]
         + [{"Type": "Reference", "Note": n} for n in result.references]
         + [{"Type": "Disclaimer", "Note": DISCLAIMER}]
     )
@@ -148,8 +148,8 @@ def to_pdf(result: DesignResult, inputs: Any) -> bytes:
                   table([["Step", "Formula", "Numbers", "Result", "Source"]] + [[s.label, s.formula_text(), s.substitution, s.result_text(), s.source] for s in result.steps], [38, 45, 42, 25, 25])]
     if result.convergence:
         story += [Paragraph("Convergence", head), table([["Iteration", "Converged", "Passes", "Tolerance", "Residual"]] + [[c.name, c.converged, c.iterations, c.tolerance, c.residual] for c in result.convergence], [75, 25, 20, 27, 28])]
-    story += bullets("Assumptions", result.assumptions)
-    story += bullets("Source gaps", result.source_gaps)
+    story += bullets("Design basis", result.design_basis)
+    story += bullets("Scope limits", result.scope_limits)
     story += bullets("References", result.references)
 
     buffer = io.BytesIO()

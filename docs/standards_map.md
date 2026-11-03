@@ -1,34 +1,27 @@
 # Standards map
 
-**None of these standards were available when this was written, and none have been read.** The lectures name ASME VIII, BS 5500, TEMA, API 660 and HEI (Lecture 8). The rest of this table comes from general engineering knowledge, so confirm every line, including document numbers and editions, against the standards themselves.
-
-Nothing in this application establishes code compliance. Every code-dependent check is recorded in the results as **not assessed**.
+The application separates six kinds of result, so a thermal sizing cannot be mistaken for a mechanical verification. The standards themselves were not used: ASME and TEMA appear only as quoted in HEDH Part 4, at the editions HEDH cites. The document names in the last column come from Lecture 8, HEDH and general engineering knowledge. Nothing here establishes code compliance.
 
 ## What governs what
 
-| Design area | Handled here | Governing documents to confirm against |
-|---|---|---|
-| Thermal design | Yes, from textbook methods | Not generally set by codes. HEI for steam surface condensers |
-| Hydraulic design | Yes, from textbook methods | Allowable values are usually a project specification |
-| Preliminary geometric sizing | Yes: tube and pitch rules as quoted in Lecture 9 | TEMA, for shell-and-tube dimensions and tolerances |
-| Mechanical design (thickness, tubesheets, flanges, nozzles) | **No** | ASME BPVC Section VIII; TEMA |
-| Tube vibration | **No** | TEMA |
-| Fabrication and inspection | **No** | ASME BPVC Section VIII; TEMA |
-| Code verification | **No** | Qualified engineering review against the applicable edition |
+| Design area | Handled here | From | Governing documents |
+|---|---|---|---|
+| Thermal design | Yes | Textbook methods | Not generally set by codes. HEI for steam surface condensers |
+| Hydraulic design | Yes | Textbook methods; Lecture 9 thumb rules | Allowable values are usually a project specification |
+| Preliminary geometric sizing | Yes | Lecture 9; HEDH 3.3.5; HEDH 4.2.5 tables | TEMA, for dimensions and tolerances |
+| Mechanical screening: shell, tube, tubesheet thickness | Yes, as screening | HEDH 4.3.6; TEMA minimums as quoted in HEDH 4.2.6 | ASME BPVC Section VIII; TEMA |
+| Tube vibration screening | Yes, as screening | HEDH 4.6 | TEMA |
+| Flanges, nozzle reinforcement, expansion joints | **No** | | ASME BPVC Section VIII; TEMA |
+| Fabrication and inspection | **No** | | ASME BPVC Section VIII; TEMA |
+| Code verification | **No** | | Qualified engineering review against the applicable edition |
 
 ## By condenser type
 
-| Module | Likely governing documents (to confirm) | Notes |
+| Module | Governing documents | Notes |
 |---|---|---|
-| Vertical shell-and-tube | TEMA; ASME VIII; API 660 / ISO 16812 for refinery duties; HEI for steam surface condensers | Lecture 8 gives TEMA classes R, C, B and nomenclature; the app does not design to them |
-| Plate | ASME VIII; API 662 / ISO 15547 | Limits used here come from Lecture 2 and Lecture 13, not a standard |
-| Air-cooled | API 661 / ISO 13706 | Fan and noise requirements are usually in these documents and the project specification |
-| Direct-contact | ASME VIII for the vessel; HEI for direct-contact and barometric condensers | |
+| Vertical shell-and-tube | TEMA; ASME VIII; API 660 / ISO 16812 for refinery duties; HEI for steam surface condensers | Lecture 8 gives TEMA classes R, C, B and nomenclature; screening uses class R minimum shell thickness as quoted in HEDH 4.2.6 |
+| Plate | ASME VIII; API 662 / ISO 15547 | Pressure, temperature and gasket limits come from HEDH 3.7, HEDH 4.4.2, HSB Table 4.1 and Lecture 13. Plate stress is not assessed |
+| Air-cooled | API 661 / ISO 13706 | Fan and noise rules come from HEDH 3.8, 4.4.1 and 4.8.3; API 661 values are listed as guidance from its 2nd edition |
+| Direct-contact | ASME VIII for the vessel; HEI for direct-contact and barometric condensers | HEDH 3.5 cites HEI without quoting numbers |
 
-## Bringing in a standard later
-
-1. Add the check to the module, citing the clause and edition.
-2. Change its `result.check(name, None, ...)` to a real pass or fail.
-3. Add a test with a case the standard or a worked example supports.
-
-A standard's text should not be copied into this repository, because of copyright.
+A standard's text must not be copied into this repository, because of copyright.

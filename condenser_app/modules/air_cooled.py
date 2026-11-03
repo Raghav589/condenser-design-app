@@ -3,6 +3,7 @@
 Sources, read from the page images:
 * HSB Ch. 19 (Secs. 19.3-19.6, Examples 19.1, 19.2), Ch. 9 (Example 9.1), Sec. 2.4.5.2 (Eqs. 2.221-2.253, Example 2.11), Sec. 17.3.2.
 * HEDH Sec. 3.8.5 (rating), 3.8.7 (fans), 3.8.8 (natural draft), 3.8.9 (noise, vacuum and exhaust steam units, worked problem).
+* HEDH Sec. 3.4.6 B and 2.6.2 (regime criteria along the tube), 4.4.1 (fan practice, API 661 values), 4.8.3 Table 8 (fan noise at 1 m), 4.9.2 Table 3.
 * ME6220 Lecture 23: freezing, venting and condensate control, in words only.
 * The condensation library, common/condensation.py, for the tube side: HSB Sec. 16.3.2, 16.3.3 and Sec. 10.
 
@@ -30,10 +31,12 @@ from ..common.condensation import (
     kosky_staub_delta_plus,
     kosky_staub_t_plus,
     mean_coefficient_over_quality,
+    palen_interpolation,
     prandtl_liquid,
     tube_two_phase_pressure_drop,
     vertical_downflow_local,
     void_fraction_premoli,
+    wallis_gas_parameter,
 )
 from ..common.iteration import fixed_point
 from ..common.properties import air as air_table, pentane_hsb_example_16_2
@@ -84,8 +87,18 @@ DP_DYN_RANGE = (40.0, 60.0)  # HEDH 3.8.7 B
 FAN_STATIC_MAX = 200.0  # HEDH 3.8.5 C, conventional fans develop 100 to 200 Pa
 FAN_POWER_FRACTION = (0.01, 0.03)  # HEDH 3.8.7 B
 MOTOR_MARGIN = {"fixed": 1.30, "seasonal": 1.15, "autovariable": 1.0}  # HEDH 3.8.7 C: 25-30%, 15%, none stated for autovariable
+MOTOR_MARGIN_MIN = {"fixed": 0.25, "seasonal": 0.15}  # HEDH 3.8.7 C, the lower end of each
+FAN_DIAMETER_RANGE = (1.8, 4.1)  # HEDH 4.4.1-6, "normally range"
+TIP_SPEED_LIMIT = 61.0  # HEDH 4.4.1-6, "safe upper limit"
+TIP_SPEED_AVERAGE = (46.0, 51.0)  # HEDH 4.4.1-6, where the average speed "probably falls"
+NOISE_AT_1M = ((30.0, 75.0), (35.0, 77.0), (45.0, 81.0), (60.0, 85.0))  # HEDH 4.8.3 Table 8: tip speed m/s, dBA at 1 m
 NOISE_BASE = {"normal": 44.0, "low_noise": 37.0}  # HSB Eq. 19.2; HEDH 3.8.9 Eq. (1)
 VACUUM_LIMIT_PA = 30.0 * 133.322  # HEDH 3.8.9 B, "below 30 torr"
+SONIC_FRACTION_SHARP_EDGED = (0.5, 0.6)  # HEDH 3.8.9 B, sharp-edged tubes
+SHORT_TUBE_MAX_M = 2.0  # HEDH 3.8.9 B, "short tubes of 1.0 or 2.0 m"
+REGIME_F = (5.0, 29.0)  # HEDH 3.4.6 B and 2.6.2 Eq. (77) text, Jaster and Kosky: no-shear at or below, shear at or above
+REGIME_JG = (0.5, 1.5)  # HEDH 3.4.6 B and 2.6.2 text, Breber et al. and Palen et al.
+NO_SHEAR, TRANSITION, SHEAR = "no-shear", "transition", "shear"
 CONTACT_T_C = 100.0  # HSB Sec. 9.3.3; HEDH 3.8.3 A
 TOWER_HEIGHT_TYPICAL = (30.0, 45.0)  # HSB Sec. 9.3.1.2
 
@@ -101,7 +114,8 @@ class CondensingStream:
     m_dot: float | None = inp("Total process mass flow", "kg/s", minimum=0, exclusive_minimum=True, source="HSB Ex. 19.1")
     x_in: float | None = inp("Inlet vapour quality", minimum=0, maximum=1, default=1.0, help="Below 1 a two-phase mixture enters the plenum, and the liquid is likely to be maldistributed (HSB Ex. 19.2 note). Superheat is not treated.", source="HSB Ex. 19.1")
     x_out: float | None = inp("Outlet vapour quality", minimum=0, maximum=1, default=0.0, help="Condensate subcooling below x = 0 is not treated.", source="HSB Ex. 19.1")
-    pressure: float | None = inp("Condensing pressure", "Pa", display_unit="kPa", required=False, minimum=0, exclusive_minimum=True, help="Optional. Sets the pressure-drop feedback and vacuum checks.", source="HEDH 3.8.9 B")
+    pressure: float | None = inp("Condensing pressure", "Pa", display_unit="kPa", required=False, minimum=0, exclusive_minimum=True, help="Optional. Sets the pressure-drop feedback, the 30 torr check and the sonic limit at the tube inlet.", source="HEDH 3.8.9 B")
+    gamma: float | None = inp("Vapour isentropic exponent", required=False, minimum=1, help="Optional, for the speed of sound c = (gamma P/rho_v)^(1/2). Empty: 1, the isothermal value, which gives the lowest c and so the stricter sonic check.", source="Ideal gas; HEDH 3.8.9 B gives no formula")
     noncondensables: str | None = inp("Non-condensable gas or a mixture present?", choices=YN, default="no", help="This module is for a single pure vapour. 'yes' only raises a warning: HSB Table 9.1 shows much lower U and Secs. 16.5, 19.3.3 apply.", source="HSB Table 9.1, Sec. 19.3.3")
 
 
@@ -136,7 +150,7 @@ class BundleGeometry:
 @dataclass
 class TubeSideOptions:
     tube_angle: float | None = inp("Tube angle from the horizontal", "deg", minimum=0, maximum=90, default=90.0, help="90 = vertical downflow, sin(alpha) = -1. Vapour enters at the top. Sets the static head in the pressure drop and the gravity term of the film.", source="HSB Secs. 19.3.1, 19.3.5, Eq. 10.26")
-    method: str | None = inp("Tube-side condensing method", choices=(METHOD_VERTICAL, METHOD_BK), default=METHOD_VERTICAL, help="vertical_downflow: HSB Eq. 16.56, gravity and shear combined (HSB's method for this geometry). boyko_kruzhilin: HSB Eq. 16.55, end-value mean, shear only, as Ex. 19.2 uses 'for simplicity'. The other is reported as a cross-check.", source="HSB Sec. 16.3.3; Ex. 19.2")
+    method: str | None = inp("Tube-side condensing method", choices=(METHOD_VERTICAL, METHOD_BK), default=METHOD_VERTICAL, help="vertical_downflow: HSB Eq. 16.56, gravity and shear combined, the default because it holds in every regime HEDH 3.4.6 B finds along a vertical tube. boyko_kruzhilin: HSB Eq. 16.55, end-value mean, shear only, as Ex. 19.2 uses 'for simplicity'. The other is reported as a cross-check.", source="HSB Sec. 16.3.3; HEDH 3.4.6 B; Ex. 19.2")
     shear_term: str | None = inp("Shear term in the vertical_downflow method", choices=("kosky_staub", "boyko_kruzhilin", "butterworth", "chen"), default="kosky_staub", help="kosky_staub is HSB's stated procedure. chen is HSB's interim suggestion and runs lowest.", source="HSB Secs. 16.3.2, 16.3.3")
     suction_correction: str | None = inp("Apply the condensation (suction) shear correction?", choices=YN, default="no", help="HSB Eq. 16.76, at the mean condensation flux. Off is the lower, conservative coefficient; see docs/algorithms/condensation_library.md.", source="HSB Eq. 16.76")
 
@@ -146,11 +160,12 @@ class FanData:
     draft: str | None = inp("Air supply", choices=(FORCED, INDUCED, NATURAL), default=FORCED, help="HSB Sec. 9.3.1: forced draft moves denser, cooler air and needs less power; induced draft distributes the air better. Natural: no fan, reports the tower height HEDH 3.8.8 needs.", source="HSB Secs. 9.3.1, 19.3.1; HEDH 3.8.8")
     efficiency: float | None = inp("Fan efficiency", minimum=0, exclusive_minimum=True, maximum=1, default=0.65, help="HEDH 3.8.7 B: often 0.6 to 0.7.", source="HEDH 3.8.7 B")
     dp_other: float | None = inp("Other air-side static losses", "Pa", default=0.0, minimum=0, help="Entrance and similar. HEDH's worked problem estimates 26 Pa on a 84 Pa bundle; no method is given.", source="HEDH 3.8.9 worked problem")
-    fan_diameter: float | None = inp("Fan diameter", "m", required=False, minimum=0, exclusive_minimum=True, help="Optional. Empty: the module reports the diameter range the area rule allows.", source="HEDH 3.8.7 Fig. 1")
+    fan_diameter: float | None = inp("Fan diameter", "m", required=False, minimum=0, exclusive_minimum=True, help="Optional. Empty: derived from the area rule at S/S_v = 2.2, the middle of 1.8 to 2.6, for the noise equations and the diameter check.", source="HEDH 3.8.7 Eq. (1), Fig. 1")
     hub_diameter: float | None = inp("Fan hub diameter", "m", required=False, minimum=0, help="Optional. The effective section for the dynamic pressure is taken as the annulus, which reproduces the 30 Pa of HEDH's worked problem.", source="HEDH 3.8.7 Fig. 1")
-    n_fans: float | None = inp("Number of fans", required=False, minimum=1, help="Optional. Empty: one if no diameter is given, otherwise the fewest that keep S/S_v below 2.6.", source="HSB Eq. 19.1")
+    n_fans: float | None = inp("Number of fans", required=False, minimum=1, help="Optional. Empty, with a diameter: the fewest that keep S/S_v below 2.6. Empty, no diameter: the fewest that keep the derived diameter within 4.1 m.", source="HSB Eq. 19.1; HEDH 4.4.1-6")
     blade_control: str | None = inp("Blade control, for the motor margin", choices=tuple(MOTOR_MARGIN), default="fixed", help="fixed: 25-30% margin for dense winter air. seasonal: blades reset by hand for summer and winter, 15%. autovariable: no margin stated.", source="HEDH 3.8.7 C")
-    tip_speed: float | None = inp("Fan blade tip speed", "m/s", required=False, minimum=0, exclusive_minimum=True, help="Optional, with the fan diameter, for the noise estimate.", source=S_NOISE)
+    motor_power: float | None = inp("Installed motor power, all fans", "W", display_unit="kW", required=False, minimum=0, exclusive_minimum=True, help="Optional. Checked against the margin HEDH asks for. Empty: the module sizes the motor at the margin.", source="HEDH 3.8.7 C")
+    tip_speed: float | None = inp("Fan blade tip speed", "m/s", required=False, minimum=0, exclusive_minimum=True, help="Optional. Empty: 48.5 m/s, the middle of the 46-51 m/s average in HEDH 4.4.1-6. Limit 61 m/s.", source="HEDH 4.4.1-6; " + S_NOISE)
     noise_design: str | None = inp("Fan noise design", choices=tuple(NOISE_BASE), default="normal", source=S_NOISE)
     noise_distance: float | None = inp("Distance for the sound pressure level", "m", required=False, minimum=0, exclusive_minimum=True, source=S_NOISE)
     dp_tower: float | None = inp("Natural draft: tower losses", "Pa", required=False, minimum=0, help="Empty: taken equal to the bundle static loss, which HEDH 3.8.8 says it often reaches.", source="HEDH 3.8.8")
@@ -301,6 +316,48 @@ def total_sound_power_level(l_w: float, n: float) -> float:
 def sound_pressure_level(l_w: float, R: float) -> float:
     """L_p = L_w - 10 log(2 pi R^2). HEDH 3.8.9 Eq. (2). SOURCE ERROR: HSB Eq. 19.3 prints a plus, which would make the level rise with distance; HEDH's worked problem subtracts."""
     return l_w - 10.0 * math.log10(2.0 * math.pi * R**2)
+
+
+def noise_table_at_1m(tip_speed: float) -> float:
+    """Indicative maximum dBA 1 m from a fan, HEDH 4.8.3 Table 8. Linear between its rows, and held at its end rows outside them."""
+    speeds, levels = zip(*NOISE_AT_1M)
+    if tip_speed <= speeds[0]:
+        return levels[0]
+    if tip_speed >= speeds[-1]:
+        return levels[-1]
+    for k in range(len(speeds) - 1):
+        if tip_speed <= speeds[k + 1]:
+            return levels[k] + (tip_speed - speeds[k]) / (speeds[k + 1] - speeds[k]) * (levels[k + 1] - levels[k])
+    return levels[-1]
+
+
+def sonic_velocity(pressure: float, rho_v: float, gamma: float = 1.0) -> float:
+    """c = (gamma P/rho_v)^(1/2), ideal gas. HEDH 3.8.9 B states the limit and gives no formula for c. gamma = 1 is the isothermal, lowest value."""
+    return math.sqrt(gamma * pressure / rho_v)
+
+
+# ------------------------------------------------------------------------------------- tube-side regime
+def hedh_film_thickness(re_l: float, tau_w: float, rho_l: float, mu_l: float) -> float:
+    """s = s+ eta_l/(rho_l u*), u* = (tau_w/rho_l)^(1/2); s+ = (Re_l/2)^(1/2) below 1250, 0.0504 Re_l^(7/8) above. HEDH 3.4.6 Eqs. (3)-(6)."""
+    s_plus = math.sqrt(re_l / 2.0) if re_l < 1250.0 else 0.0504 * re_l**0.875
+    return s_plus * mu_l / math.sqrt(rho_l * tau_w)
+
+
+def shear_parameter(fluid: CondensingFluidProperties, re_l: float, tau_w: float, g: float = G) -> float:
+    """F = tau_w/[(rho_l - rho_g) g s]. HEDH 3.4.6 Eq. (1); F_JK of HEDH 2.6.2 Eq. (77)."""
+    return tau_w / ((fluid.rho_l - fluid.rho_v) * g * hedh_film_thickness(re_l, tau_w, fluid.rho_l, fluid.mu_l))
+
+
+def regime_of(value: float, limits: tuple[float, float]) -> str:
+    """No-shear at or below the lower limit, shear at or above the upper, transition between. HEDH 3.4.6 B."""
+    if value <= limits[0]:
+        return NO_SHEAR
+    return SHEAR if value >= limits[1] else TRANSITION
+
+
+def regime_coefficient(j_g: float, alpha_shear: float, alpha_gravity: float) -> float:
+    """HEDH 3.4.6 B by the j_g* limits: the shear value, the no-shear value, and a linear interpolation between (HEDH 2.6.2 Eq. 80, HSB Eq. 16.65)."""
+    return palen_interpolation(j_g, alpha_shear, alpha_gravity)
 
 
 def natural_draft_height(dp_tower: float, dp_stat: float, delta_rho: float, g: float = G) -> float:
@@ -620,7 +677,7 @@ class AirCooledModule(CondenserModule):
         if inputs.tube_side.method == METHOD_BK:
             shown -= {"tube_side.shear_term", "tube_side.suction_correction"}
         if inputs.fan.draft == NATURAL:
-            shown -= {f"fan.{name}" for name in ("efficiency", "fan_diameter", "hub_diameter", "n_fans", "blade_control", "tip_speed", "noise_design", "noise_distance")}
+            shown -= {f"fan.{name}" for name in ("efficiency", "fan_diameter", "hub_diameter", "n_fans", "blade_control", "motor_power", "tip_speed", "noise_design", "noise_distance")}
         else:
             shown.discard("fan.dp_tower")
         return shown
@@ -678,8 +735,6 @@ class AirCooledModule(CondenserModule):
         if f.draft != NATURAL:
             if f.hub_diameter is not None and (f.fan_diameter is None or f.hub_diameter >= f.fan_diameter):
                 issues.append(InputIssue("fan.hub_diameter", "A hub diameter needs a fan diameter larger than it."))
-            if f.tip_speed is not None and f.fan_diameter is None:
-                issues.append(InputIssue("fan.fan_diameter", "The noise estimate needs the fan diameter as well as the tip speed."))
         return issues
 
     # ----------------------------------------------------------------------------------------- design
@@ -711,7 +766,7 @@ class AirCooledModule(CondenserModule):
     # ------------------------------------------------------------------------------------------ notes
     @staticmethod
     def _notes(i: AirCooledInputs, r: DesignResult) -> None:
-        r.assumptions += [
+        r.design_basis += [
             "Pure vapour at constant T_sat, so F = 1: 'because the condensation is at nearly constant temperature (pure vapor), the value of F is unity' (HSB Ex. 19.1). HEDH 3.8.5 I: for isothermal condensation tau = dt_prod/dt_air = 0, and the same Phi_air is obtained for all flow arrangements, so the number of rows and the tube passes do not enter the mean temperature difference.",
             "U is based on the outside area of the bare tube, A_T (HSB Eq. 9.1, Table 9.1). HEDH 3.8.3 stresses that the reference area is arbitrary, so U is comparable only on the same basis; U on the total finned area is also output.",
             "Averaged tube-side conditions with one U for the whole bundle (HSB Sec. 19.4, as in Ex. 19.2). HSB says accurate design needs a multidimensional code such as ACOL, because the condensing rate varies by row. This module is the approximate design of Sec. 19.4 and is not a substitute for one.",
@@ -720,21 +775,21 @@ class AirCooledModule(CondenserModule):
             "The air-side correlations are for cross-flow finned tube banks with no statement on orientation. They are used unchanged for a vertical bundle with air flowing horizontally through it (HSB Fig. 19.7).",
         ]
         if i.tube_side.method == METHOD_VERTICAL:
-            r.assumptions.append(
-                "Tube-side method: HSB Eq. 16.56, alpha = (alpha_sh^2 + alpha_grav^2)^(1/2), chosen because HSB Sec. 16.3.3 gives it for downflow and it carries the gravity term that vertical downflow adds; Boyko-Kruzhilin has none and HSB says it has 'a much weaker fundamental basis'. It is reported as the cross-check. The mean is area-weighted (harmonic) since dA = dQ/(U dT) and dQ is proportional to dx. "
+            r.design_basis.append(
+                "Tube-side method: HSB Eq. 16.56, alpha = (alpha_sh^2 + alpha_grav^2)^(1/2). Reason: HEDH 3.4.6 B's F and j_g* show the regime changing along the tube as the vapour condenses (station table below), and Eq. 16.56 tends to the right coefficient in the shear and the no-shear limits, while Boyko-Kruzhilin has no gravity term and HSB says it has 'a much weaker fundamental basis'. Boyko-Kruzhilin is reported as the cross-check. The mean is area-weighted (harmonic) since dA = dQ/(U dT) and dQ is proportional to dx. "
                 + ("The suction correction, Eq. 16.76, is on, at the mean condensation flux." if i.tube_side.suction_correction == "yes" else "The suction correction, Eq. 16.76, is off: the lower, conservative coefficient (see docs/algorithms/condensation_library.md).")
             )
         else:
-            r.assumptions.append(
-                "Tube-side method: Boyko-Kruzhilin (HSB Eq. 16.55), as HSB Ex. 19.2 uses 'for simplicity'. Its end-value arithmetic mean is exactly the area-weighted mean of Eq. 16.55 when x is linear in area. It has no gravity term, so the tube angle does not change it. For a vertical tube HSB's method is Eq. 16.56, reported here as the cross-check."
+            r.design_basis.append(
+                "Tube-side method: Boyko-Kruzhilin (HSB Eq. 16.55), as HSB Ex. 19.2 uses 'for simplicity'. Its end-value arithmetic mean is exactly the area-weighted mean of Eq. 16.55 when x is linear in area. It has no gravity term, so the tube angle does not change it, and HEDH 3.4.6 B's criteria below show where along the tube shear alone stops being enough. For a vertical tube the default is Eq. 16.56, reported here as the cross-check."
             )
-        r.source_gaps += [
-            "The project's supplied air-cooled algorithm is not available. This module follows HSB Ch. 9, 16, 19 and HEDH 3.8; replace or confirm it when the project drive is added.",
+        r.design_basis.append("Design basis: the approximate design of HSB Sec. 19.4 with HSB Ch. 9 and 16 and HEDH 3.8, because they are the published air-cooled methods. No book has a complete vertical downflow air-cooled worked example.")
+        r.scope_limits += [
             "HOW FAR THE BENCHMARKS EXTEND. HSB Ex. 9.1, 19.1 and 19.2 are not vertical downflow cases: Ex. 9.1 cools water, and Ex. 19.1 and 19.2 state no orientation and use Boyko-Kruzhilin. They validate the duty, LMTD, air side, U and length. They do not test what vertical downflow changes: (1) the gravity film term of Eq. 16.56, for which HSB has no worked example; (2) the static head, which is a pressure gain in downflow, carried by sin_alpha = -sin(tube angle) in HSB Eq. 10.26; (3) drainage: HSB Sec. 19.3.5 says vertical units have no drainage problem provided the vapour enters at the top, with no stratification or flooding as long as flow is co-current; (4) layout: the fan sits to one side and the air flows horizontally (Fig. 19.7), and the correlations do not state orientation.",
             "Friedel's downflow form is not in the sources (HSB Sec. 10.5); its printed form is used, as HSB does in Ex. 16.2. For an inclined tube, g sin(theta) in the gravity film term is HSB's statement for a flat surface (below Eq. 16.14); the film in an inclined tube is not uniform round the periphery, and no source gives a method between vertical and horizontal. HEDH 3.4.6 B says the coefficient depends on inclination only at low shear.",
             "No row-by-row or tube-by-tube solution: HSB Sec. 19.4 explains it needs balanced pressure drops between rows and leaves it to computer codes. Maldistribution is reported only as an indicator. Header, entrance and exit losses on the tube side have no procedure in the sources and are left out.",
-            "Not treated, no procedure used here: superheated vapour, condensate subcooling, non-condensables and mixtures (HSB Sec. 16.5 applies), a reflux section for venting (HSB Sec. 19.3.3; flooding functions are in the library), several tube passes, in-line high-fin arrays (HSB Eq. 2.245 gives Nu, but no source gives K_f), tapered fins (HSB Eq. 2.249 not applied).",
-            "Fan: only HEDH's rough power formula is used. Fan charts such as HEDH 3.8.7 Fig. 1 are for one fan and are not digitised, so efficiency is an input. The only rule on the number of fans is the area ratio 1.8 < S/S_v < 2.6. HEDH does not define its 'effective fan cross section' S_VE; the annulus was inferred from its worked problem. Natural draft: HEDH 3.8.8 gives only the draft balance, so the module reports the required height at the chosen air flow, not a coupled solution or tower geometry.",
+            "Outside this module's scope: superheated vapour, condensate subcooling, non-condensables and mixtures (HSB Sec. 16.5 applies), a reflux section for venting (HSB Sec. 19.3.3; flooding functions are in the library), several tube passes, in-line high-fin arrays (HSB Eq. 2.245 gives Nu, but no source gives K_f), tapered fins (HSB Eq. 2.249 not applied).",
+            "Fan: power is HEDH's rough formula. HEDH 3.8.7 Fig. 1 is a chart for one fan (3.65 m, 288 rpm), so it is not used for other fans and efficiency is an input. The number of fans follows from the area ratio 1.8 < S/S_v < 2.6 and the 4.1 m diameter range. The PDF does not define HEDH's 'effective fan cross section' S_VE; this module reads it as the annulus outside the hub, which gives the 30 Pa of its worked problem. Natural draft: HEDH 3.8.8 gives only the draft balance, so the module reports the required height at the chosen air flow, not a coupled solution or tower geometry.",
             "Lecture 23 gives freezing, venting and condensate control only in words, and its air-cooled slide has no calculation. Lecture 24 treats shell-and-tube condensers. Lectures 18 to 20 treat plate-fin surfaces by j and f charts and use mean temperature charts; HSB's correlations for round high fins are used instead. Lecture 20's eta_o = 1 - (1 - eta_f)A_f/A is the same as HSB Eq. 2.235.",
         ]
 
@@ -750,7 +805,7 @@ class AirCooledModule(CondenserModule):
             r.step("Air outlet from the given air flow", "T_a,out", "T_a,out = T_a,in + Q / (M_a c_p)", f"{_n(a.T_in)} + {_n(d.Q)} / ({_n(a.m_dot)} {_n(ap.cp)})", d.T_out_lm, "degC", THE, "HSB Ex. 9.1")
         if d.T_out_lm is not None:
             r.step(
-                "Mean temperature difference, F = 1 because T_sat is constant (see assumptions)", "dT_LM",
+                "Mean temperature difference, F = 1 because T_sat is constant (see the design basis)", "dT_LM",
                 "dT_LM = [(T_sat - T_a,out) - (T_sat - T_a,in)] / ln[(T_sat - T_a,out)/(T_sat - T_a,in)]",
                 f"[({_n(p.T_sat)} - {_n(d.T_out_lm)}) - ({_n(p.T_sat)} - {_n(a.T_in)})] / ln[({_n(p.T_sat)} - {_n(d.T_out_lm)})/({_n(p.T_sat)} - {_n(a.T_in)})]",
                 d.dT_lm, "K", THE, "HSB Ex. 19.1 step 1",
@@ -770,11 +825,11 @@ class AirCooledModule(CondenserModule):
                 why = "Here the velocity is fixed, so alpha_a does not move with L, and U changes only from the guess to the calculated value: two passes, as Ex. 19.1 then 19.2."
             else:
                 why = "L sets the face area S_0 = width L and S_min, so at a given air flow it sets the velocity, the air-side coefficient and U, which sets the area and so L."
-            r.assumptions.append(
+            r.design_basis.append(
                 f"Why the length iterates: {why} First guess: the Ex. 19.1 estimate with the typical U of Table 9.1, the book's own starting point. Update: L(next) = L A_req/A_T, which with a given air velocity becomes L Q/[M c_p (T_sat - T_a,in)(1 - exp(-NTU))] because the flow grows with L. Stop: |change in L| < 0.1 mm. The update contracts because U changes with L at less than the first power: alpha_a goes as L^-0.658 at a given air flow, and the air side is only part of the resistance."
             )
         else:
-            r.assumptions.append(
+            r.design_basis.append(
                 "Why the tube count iterates: n_t sets the tube-side mass flux and alpha_i, the face area and so the air velocity and alpha_a, and hence U and the area needed. First guess: one tube per row, so that climbing from below stops at a count that meets the duty. Update: n_t(next) = ceil(n_t A_req/A_T), never falling. Stop: count unchanged, then step back while the smaller count still meets the duty. The excess area of the last whole tube is reported."
             )
 
@@ -846,8 +901,62 @@ class AirCooledModule(CondenserModule):
             self._downflow_table(i, ev, shear, r, info, method)
         else:
             why = "the surface tension is missing, which Friedel needs" if not p.sigma else "the tube is horizontal, so there is no gravity film term"
-            r.source_gaps.append(f"The vertical_downflow cross-check was not computed: {why}.")
+            r.scope_limits.append(f"The vertical_downflow cross-check was not computed: {why}.")
+        self._regime_table(i, ev, shear, r, info)
         return info
+
+    @staticmethod
+    def _regime_table(i: AirCooledInputs, ev: _Eval, shear: str, r: DesignResult, info: dict) -> None:
+        """HEDH 3.4.6 B along the tube: j_g*, F, the regime each gives, and the condensing method that applies at each station."""
+        p, g, s, ts = i.fluid, i.geometry, i.stream, i.tube_side
+        D = g.D_i
+        n = 10
+        dx = (s.x_in - s.x_out) / n
+        stations = [s.x_in - (j + 0.5) * dx for j in range(n)]
+        full = bool(p.sigma) and ts.tube_angle > 0.0
+        per_x = wallis_gas_parameter(p, ev.m, 1.0, D)
+        r.step("Wallis gas parameter per unit quality, so j_g* = C x along the tube", "C", "C = m / [g D_i rho_G (rho_L - rho_G)]^(1/2)", f"{_n(ev.m)} / [{_n(G)} ({_n(D)}) {_n(p.rho_v)} ({_n(p.rho_l)} - {_n(p.rho_v)})]^(1/2)", per_x, "", THE, "HEDH 3.4.6 Eq. (2)")
+        x_shear, x_gravity = REGIME_JG[1] / per_x, REGIME_JG[0] / per_x
+        r.step("Quality above which the flow is shear-controlled. Above 1: never reached in this tube", "x_shear", "x_shear = 1.5/C", f"1.5 / {_n(per_x)}", x_shear, "", THE, "HEDH 3.4.6 B, j_g* >= 1.5")
+        r.step("Quality below which the flow is no-shear. Above 1: the whole tube", "x_no-shear", "x_no-shear = 0.5/C", f"0.5 / {_n(per_x)}", x_gravity, "", THE, "HEDH 3.4.6 B, j_g* <= 0.5")
+        method_for = {
+            SHEAR: "shear: HEDH Eqs. (11)-(14), which Eq. 16.56 tends to; Boyko-Kruzhilin applies",
+            TRANSITION: "transition: linear between shear and no-shear (HEDH), which Eq. 16.56 blends",
+            NO_SHEAR: "no-shear: gravity film, HEDH Eqs. (17)-(19), which Eq. 16.56 tends to; Boyko-Kruzhilin does not apply",
+        }
+        rows, regimes = [], []
+        for x in stations:
+            j_g = per_x * x
+            regime = regime_of(j_g, REGIME_JG)
+            regimes.append(regime)
+            f_val = f_regime = alpha_map = alpha_16_56 = None
+            if full:
+                st = local_downflow_state(p, ev.m, x, D, ts.tube_angle, shear, None)
+                f_val = shear_parameter(p, st.re_f, st.tau_i)
+                f_regime = regime_of(f_val, REGIME_F)
+                alpha_map = regime_coefficient(j_g, st.alpha_shear, st.alpha_gravity)
+                alpha_16_56 = st.alpha
+            rows.append([x, j_g, f_val, regime, f_regime, method_for[regime], alpha_map, alpha_16_56, boyko_kruzhilin_local(p, ev.m, x, D)])
+        table = ConvergenceInfo("Tube-side regime and method along the tube, HEDH 3.4.6 B (a table, not an iteration)", True, n, 0.0, 0.0)
+        table.columns = ["x", "j_g*", "F", "Regime by j_g*", "Regime by F", "Method that applies", "alpha, HEDH regime rule (W/m2.K)", "alpha, Eq. 16.56 (W/m2.K)", "alpha, BK (W/m2.K)"]
+        table.rows = rows
+        r.convergence.append(table)
+        counts = {name: regimes.count(name) for name in (SHEAR, TRANSITION, NO_SHEAR)}
+        info.update(regime_counts=counts, regime_rows=rows, n_stations=n)
+        if full:
+            r.design_basis.append("Regime criteria: j_g* decides the station, because HEDH 3.4.6 B reports it fits the data better than F and gives the limiting qualities directly. F is reported beside it, from the same Friedel wall shear the film term uses; HEDH's own route to tau_w is the Martinelli relation, Eqs. (7)-(10). Both limits are from horizontal-tube work, and HEDH 3.4.6 B states they are assumed to apply to vertical downflow.")
+            q = _as_int(i.solver.n_quality)
+
+            def alpha_by_rule(x: float) -> float:
+                st = local_downflow_state(p, ev.m, x, D, ts.tube_angle, shear, None)
+                return regime_coefficient(per_x * x, st.alpha_shear, st.alpha_gravity)
+
+            mean = mean_coefficient_over_quality(alpha_by_rule, s.x_in, s.x_out, q, "area")
+            r.step(f"Comparison: area-weighted mean coefficient by HEDH's regime rule, {q} steps", "alpha_m,HEDH", "alpha = alpha_sh (j_g* >= 1.5), alpha_grav (j_g* <= 0.5), linear between; 1/alpha_m = [1/(x_in - x_out)] Integral dx/alpha", f"{q} steps between x = {_n(s.x_in)} and {_n(s.x_out)}", mean, "W/m2.K", THE, "HEDH 3.4.6 B; HEDH 2.6.2 Eq. (80)")
+            r.output("alpha_i_regime_rule", "Mean tube-side coefficient by HEDH 3.4.6 B's regime rule", mean, "W/m2.K", THE, "HEDH 3.4.6 B")
+        r.output("x_shear_limit", "Quality above which the flow is shear-controlled (j_g* = 1.5)", x_shear, "", THE, "HEDH 3.4.6 B")
+        r.output("x_no_shear_limit", "Quality below which the flow is no-shear (j_g* = 0.5)", x_gravity, "", THE, "HEDH 3.4.6 B")
+        info["x_shear"], info["x_no_shear"] = x_shear, x_gravity
 
     @staticmethod
     def _downflow_table(i: AirCooledInputs, ev: _Eval, shear: str, r: DesignResult, info: dict, method: str) -> None:
@@ -990,12 +1099,19 @@ class AirCooledModule(CondenserModule):
             r.step("Dynamic pressure over the fan section", "dP_dyn", "dP_dyn = (V_f/S_VE)^2 rho/2, V_f = V/n_f", f"({_n(v_dot / n_fans)}/{_n(section)})^2 {_n(rho_fan)}/2", dp_dyn, "Pa", HYD, "HEDH 3.8.7 Eq. (3)")
             out.update(area_ratio=ratio, dp_dyn_calculated=True)
         else:
-            n_fans = n_fans or 1
+            ratio = 0.5 * sum(FAN_AREA_RATIO)
+            if n_fans is None:
+                n_fans = max(1, math.ceil(ev.S_0 / (ratio * math.pi / 4.0 * FAN_DIAMETER_RANGE[1] ** 2) - 1e-9))
+                r.step("Fewest fans that keep the derived diameter within the usual 4.1 m", "n_f", "n_f = ceil(S_0 / [(S/S_v) (pi/4) 4.1^2])", f"ceil({_n(ev.S_0)} / [{_n(ratio)} (pi/4) 4.1^2])", n_fans, "", GEO, "HEDH 3.8.7 Eq. (1); HEDH 4.4.1-6")
             dmin, dmax = (math.sqrt(4.0 * ev.S_0 / (n_fans * k * math.pi)) for k in (FAN_AREA_RATIO[1], FAN_AREA_RATIO[0]))
-            r.step(f"No fan diameter given: the diameter range the area rule allows, for {n_fans} fan(s)", "D_v", "D_v = [4 S_0 / (n_f (S/S_v) pi)]^(1/2), 1.8 < S/S_v < 2.6", f"S_0 = {_n(ev.S_0)}, n_f = {n_fans}: from {_n(dmin)} (S/S_v = 2.6) to {_n(dmax)} (S/S_v = 1.8)", f"{dmin:.3g} to {dmax:.3g}", "m", GEO, "HSB Eq. 19.1; HEDH 3.8.7 Eq. (1)")
+            r.step(f"The diameter range the area rule allows, for {n_fans} fan(s)", "D_v,range", "D_v = [4 S_0 / (n_f (S/S_v) pi)]^(1/2), 1.8 < S/S_v < 2.6", f"S_0 = {_n(ev.S_0)}, n_f = {n_fans}: from {_n(dmin)} (S/S_v = 2.6) to {_n(dmax)} (S/S_v = 1.8)", f"{dmin:.3g} to {dmax:.3g}", "m", GEO, "HSB Eq. 19.1; HEDH 3.8.7 Eq. (1)")
+            diameter = math.sqrt(4.0 * ev.S_0 / (n_fans * ratio * math.pi))
+            r.step("Fan diameter for the checks and noise, not entered: the area rule at S/S_v = 2.2, the middle of its range", "D_v", "D_v = [4 S_0 / (n_f (S/S_v) pi)]^(1/2)", f"[4 ({_n(ev.S_0)}) / ({n_fans} ({_n(ratio)}) pi)]^(1/2)", diameter, "m", GEO, "HEDH 3.8.7 Eq. (1), mid value")
             dp_dyn = 0.5 * sum(DP_DYN_RANGE)
-            r.step("Dynamic pressure, the middle of the source's range, because no fan section is given", "dP_dyn", "dP_dyn = 40 to 60 Pa", "(40 + 60)/2", dp_dyn, "Pa", HYD, "HEDH 3.8.7 B")
-            out.update(area_ratio=None, dp_dyn_calculated=False, d_range=(dmin, dmax))
+            r.step("Dynamic pressure, the middle of the source's range, because no fan hub or section is entered", "dP_dyn", "dP_dyn = 40 to 60 Pa", "(40 + 60)/2", dp_dyn, "Pa", HYD, "HEDH 3.8.7 B")
+            out.update(area_ratio=ratio, dp_dyn_calculated=False, d_range=(dmin, dmax))
+        out["diameter"] = f.fan_diameter if f.fan_diameter is not None else diameter
+        out["diameter_entered"] = f.fan_diameter is not None
         power = fan_power(v_dot, a.dp_stat, dp_dyn, f.efficiency)
         r.step("Fan shaft power, all fans. HEDH calls this a rough estimate", "N", "N = V (dP_stat + dP_dyn)/eta_v", f"{_n(v_dot)} ({_n(a.dp_stat)} + {_n(dp_dyn)})/{_n(f.efficiency)}", power, "W", HYD, "HEDH 3.8.7 Eq. (2)")
         r.step("Fan power as a share of the duty", "N/Q", "N/Q", f"{_n(power)}/{_n(d.Q)}", power / d.Q, "", THE, "HEDH 3.8.7 B")
@@ -1005,17 +1121,25 @@ class AirCooledModule(CondenserModule):
             r.step("Air temperature rise from the fan's dissipation. Upstream of the bundle in forced draft, and not added to T_a,in here; HSB Sec. 19.3.1 notes induced draft puts it after the condenser", "dT_fan", "dT_fan = N / (M_a c_p)", f"{_n(power)} / ({_n(ev.M_a)} {_n(ap.cp)})", power / (ev.M_a * ap.cp), "K", THE, "HSB Sec. 19.3.1")
         out.update(n_fans=n_fans, power=power, dp_dyn=dp_dyn, v_dot=v_dot, motor=margin * power, rho_fan=rho_fan)
 
-        if f.tip_speed is not None and f.fan_diameter is not None:
-            c = NOISE_BASE[f.noise_design]
-            l_w = sound_power_level(c, f.tip_speed, a.dp_stat, v_dot / n_fans, f.fan_diameter)
-            r.step("Sound power level of one fan", "L_w", "L_w = c + 30 log w + 10 log(dP_stat V_f/1000) - 5 log D", f"{_n(c)} + 30 log {_n(f.tip_speed)} + 10 log({_n(a.dp_stat)} {_n(v_dot / n_fans)}/1000) - 5 log {_n(f.fan_diameter)}", l_w, "dB(A)", MEC, S_NOISE)
-            l_n = total_sound_power_level(l_w, n_fans)
-            r.step("Sound power level of all the fans", "(L_w)_n", "(L_w)_n = L_w + 10 log n", f"{_n(l_w)} + 10 log {n_fans}", l_n, "dB(A)", MEC, "HEDH 3.8.9 Eq. (3)")
-            out.update(l_w=l_w, l_n=l_n)
-            if f.noise_distance is not None:
-                l_p = sound_pressure_level(l_n, f.noise_distance)
-                r.step("Sound pressure level at the distance. Minus, as HEDH Eq. (2) and its worked problem have it; HSB Eq. 19.3 prints a plus in error", "L_p", "L_p = L_w - 10 log(2 pi R^2)", f"{_n(l_n)} - 10 log(2 pi {_n(f.noise_distance)}^2)", l_p, "dB(A)", MEC, "HEDH 3.8.9 Eq. (2)")
-                out["l_p"] = l_p
+        tip = f.tip_speed
+        if tip is None:
+            tip = 0.5 * sum(TIP_SPEED_AVERAGE)
+            r.step("Tip speed for the noise equation, not entered: the middle of HEDH's 46-51 m/s average", "w", "w = (46 + 51)/2", "(46 + 51)/2", tip, "m/s", MEC, "HEDH 4.4.1-6, mid value")
+        out.update(tip=tip, tip_entered=f.tip_speed is not None)
+        c = NOISE_BASE[f.noise_design]
+        l_w = sound_power_level(c, tip, a.dp_stat, v_dot / n_fans, out["diameter"])
+        r.step("Sound power level of one fan", "L_w", "L_w = c + 30 log w + 10 log(dP_stat V_f/1000) - 5 log D", f"{_n(c)} + 30 log {_n(tip)} + 10 log({_n(a.dp_stat)} {_n(v_dot / n_fans)}/1000) - 5 log {_n(out['diameter'])}", l_w, "dB(A)", MEC, S_NOISE)
+        l_n = total_sound_power_level(l_w, n_fans)
+        r.step("Sound power level of all the fans", "(L_w)_n", "(L_w)_n = L_w + 10 log n", f"{_n(l_w)} + 10 log {n_fans}", l_n, "dB(A)", MEC, "HEDH 3.8.9 Eq. (3)")
+        l_1m = sound_pressure_level(l_w, 1.0)
+        r.step("Sound pressure level 1 m from one fan, for HEDH 4.8.3 Table 8. Minus, as HEDH Eq. (2) and its worked problem have it; HSB Eq. 19.3 prints a plus in error", "L_p,1m", "L_p = L_w - 10 log(2 pi R^2), R = 1 m", f"{_n(l_w)} - 10 log(2 pi)", l_1m, "dB(A)", MEC, "HEDH 3.8.9 Eq. (2)")
+        table_1m = noise_table_at_1m(tip)
+        r.step("Indicative maximum 1 m from a fan at this tip speed, linear between the rows of HEDH's table", "L_table", "60 m/s 85; 45 m/s 81; 35 m/s 77; 30 m/s 75 dBA", f"w = {_n(tip)}", table_1m, "dB(A)", MEC, "HEDH 4.8.3 Table 8")
+        out.update(l_w=l_w, l_n=l_n, l_1m=l_1m, table_1m=table_1m)
+        if f.noise_distance is not None:
+            l_p = sound_pressure_level(l_n, f.noise_distance)
+            r.step("Sound pressure level at the distance. Minus, as HEDH Eq. (2) and its worked problem have it; HSB Eq. 19.3 prints a plus in error", "L_p", "L_p = L_w - 10 log(2 pi R^2)", f"{_n(l_n)} - 10 log(2 pi {_n(f.noise_distance)}^2)", l_p, "dB(A)", MEC, "HEDH 3.8.9 Eq. (2)")
+            out["l_p"] = l_p
         return out
 
     # --------------------------------------------------------------------------------------- rows
@@ -1128,7 +1252,9 @@ class AirCooledModule(CondenserModule):
             r.output("motor_power", "Motor size, all fans", fan["motor"], "W", MEC, "HEDH 3.8.7 C")
             r.output("n_fans", "Number of fans", fan["n_fans"], "", GEO, "HSB Eq. 19.1")
             r.output("dp_dynamic", "Fan dynamic pressure", fan["dp_dyn"], "Pa", HYD, "HEDH 3.8.7 Eq. (3)")
-            for key, label in (("l_w", "Sound power level, one fan"), ("l_n", "Sound power level, all fans"), ("l_p", "Sound pressure level at the distance")):
+            r.output("fan_diameter", "Fan diameter" + ("" if fan["diameter_entered"] else ", derived at S/S_v = 2.2"), fan["diameter"], "m", GEO, "Input" if fan["diameter_entered"] else "HEDH 3.8.7 Eq. (1), mid value")
+            r.output("tip_speed", "Fan tip speed" + ("" if fan["tip_entered"] else ", HEDH's 46-51 m/s mid value"), fan["tip"], "m/s", MEC, "Input" if fan["tip_entered"] else "HEDH 4.4.1-6, mid value")
+            for key, label in (("l_w", "Sound power level, one fan"), ("l_n", "Sound power level, all fans"), ("l_1m", "Sound pressure level 1 m from one fan"), ("l_p", "Sound pressure level at the distance")):
                 if key in fan:
                     r.output(key, label, fan[key], "dB(A)", MEC, S_NOISE)
 
@@ -1176,7 +1302,13 @@ class AirCooledModule(CondenserModule):
         r.check("Blasius friction in the two-phase multipliers", re_lo >= 2000.0, f"Re_LO = {re_lo:.0f}. HSB gives no laminar branch for the multipliers, and Blasius is not valid below about 2000.", HYD, "HSB Eq. 2.279; library note")
         if ts.method == METHOD_BK:
             r.check("Boyko-Kruzhilin range", None, f"HSB states none; its examples cover Re_LO = 5381 and 9.43e4, and this case has {re_lo:.0f}. It is shear-controlled with no gravity term, so at a low mass flux it is doubtful for a vertical tube; compare the Eq. 16.56 cross-check.", THE, "HSB Sec. 16.3.2.2")
+        counts = tube["regime_counts"]
+        spread = f"{counts[SHEAR]} shear, {counts[TRANSITION]} transition, {counts[NO_SHEAR]} no-shear of {tube['n_stations']} stations (j_g* >= 1.5 above x = {tube['x_shear']:.3f}, j_g* <= 0.5 below x = {tube['x_no_shear']:.3f})."
+        if ts.method == METHOD_BK:
+            r.check("Tube-side method fits the regime along the tube", counts[NO_SHEAR] == 0, f"{spread} Boyko-Kruzhilin is shear-only, so it does not apply at a no-shear station.", THE, "HEDH 3.4.6 B; HSB Sec. 16.3.2.2")
         else:
+            r.check("Tube-side method fits the regime along the tube", True, f"{spread} Eq. 16.56 tends to the shear and the gravity coefficient at the two ends, so it holds at every station.", THE, "HEDH 3.4.6 B; HSB Sec. 16.3.3")
+        if ts.method != METHOD_BK:
             regimes = ", ".join(sorted(tube["regimes"]))
             r.check("Film regimes met along the tube", True, f"{regimes}. alpha_grav takes its branch from Re_f at each station, with its jump at Re_f = 1600 (HEDH 2.6.2 Fig. 5).", THE, "HSB Sec. 16.3.1; HEDH 2.6.2")
         if tube["max_film"] is not None:
@@ -1209,11 +1341,25 @@ class AirCooledModule(CondenserModule):
         if lim.dp_allow_coolant is not None:
             r.check("Air-side allowable pressure drop", a.dp_stat <= lim.dp_allow_coolant, f"{a.dp_stat:.0f} Pa against {lim.dp_allow_coolant:.0f} Pa.", HYD)
         if s.pressure is not None:
-            r.check("Pressure-drop feedback on T_sat", None, f"Friction drop / pressure = {100.0 * hy.dp_f / s.pressure:.2f}%. A falling pressure lowers T_sat, which F = 1 and one T_sat ignore. No criterion in the sources.", THE, "HSB Ex. 19.1; HEDH 3.8.9 B")
-            if s.pressure < VACUUM_LIMIT_PA:
-                r.warnings.append(f"Condensing pressure {s.pressure:.0f} Pa is below 30 torr: HEDH 3.8.9 B says the pressure change can be of the order of the pressure, and the sonic limit at the tube inlet (as low as 50-60% of the sound speed with sharp-edged tubes) may govern. No speed of sound is available here, so it is not calculated.")
+            r.check("Pressure-drop feedback on T_sat", None, f"Friction drop / pressure = {100.0 * hy.dp_f / s.pressure:.2f}%. A falling pressure lowers T_sat, which F = 1 and one T_sat ignore. No book gives a criterion.", THE, "HSB Ex. 19.1; HEDH 3.8.9 B")
+            gamma = s.gamma if s.gamma is not None else 1.0
+            c_sound = sonic_velocity(s.pressure, p.rho_v, gamma)
+            r.step("Speed of sound in the vapour, ideal gas" + ("" if s.gamma is not None else ", isothermal because no exponent is entered: the lowest value, so the stricter check"), "c", "c = (gamma P/rho_G)^(1/2)", f"({_n(gamma)} ({_n(s.pressure)})/{_n(p.rho_v)})^(1/2)", c_sound, "m/s", HYD, "Ideal gas, not printed in the books")
+            v_inlet = ev.m * s.x_in / p.rho_v
+            r.step("Vapour velocity at the tube inlet", "v_in", "v_in = m x_in/rho_G", f"{_n(ev.m)} ({_n(s.x_in)})/{_n(p.rho_v)}", v_inlet, "m/s", HYD, "Continuity; HEDH 3.8.9 B")
+            sharp_limit = SONIC_FRACTION_SHARP_EDGED[0] * c_sound
+            r.check("Sonic limit at the tube inlet", v_inlet <= sharp_limit, f"v_in = {v_inlet:.1f} m/s against {sharp_limit:.1f} m/s, 50% of c = {c_sound:.1f} m/s. HEDH: the maximum flow is sonic at the tube inlet, and sharp-edged tubes may limit at 50-60% of the sound velocity, on the geometric tube section.", HYD, "HEDH 3.8.9 B")
+            r.output("sonic_velocity", "Speed of sound in the vapour", c_sound, "m/s", HYD, "Ideal gas; HEDH 3.8.9 B")
+            r.output("v_vapour_inlet", "Vapour velocity at the tube inlet", v_inlet, "m/s", HYD, "HEDH 3.8.9 B")
+            r.output("mach_inlet", "Vapour velocity / speed of sound at the tube inlet", v_inlet / c_sound, "", HYD, "HEDH 3.8.9 B")
+            below = s.pressure < VACUUM_LIMIT_PA
+            r.check("Vacuum limit", not below, f"P = {s.pressure:.0f} Pa against 30 torr = {VACUUM_LIMIT_PA:.0f} Pa. Below 30 torr the pressure change is often of the order of the pressure itself, and the maximum flow rather than the heat load may set the rating.", HYD, "HEDH 3.8.9 B")
+            if below:
+                r.warnings.append(f"Condensing pressure {s.pressure:.0f} Pa is below 30 torr: HEDH 3.8.9 B says the pressure change can be of the order of the pressure, and the sonic limit at the tube inlet may govern over the heat load.")
+                if v_inlet > sharp_limit and ev.L > SHORT_TUBE_MAX_M:
+                    r.warnings.append(f"The tube inlet is at its sonic limit with L = {ev.L:.2f} m. HEDH 3.8.9 B: short tubes of 1.0 or 2.0 m must then be used.")
         else:
-            r.check("Vacuum limit", None, "Condensing pressure not given. Below 30 torr HEDH 3.8.9 B says the maximum flow, sonic at the tube inlet, may govern over the heat load.", HYD, "HEDH 3.8.9 B")
+            r.check("Vacuum limit", None, "Enter the condensing pressure to run this check and the sonic limit. Below 30 torr HEDH 3.8.9 B says the maximum flow, sonic at the tube inlet, may govern over the heat load.", HYD, "HEDH 3.8.9 B")
 
         # Fan
         r.check("Static pressure against conventional fans", a.dp_stat <= FAN_STATIC_MAX, f"dP_stat = {a.dp_stat:.0f} Pa against the 100 to 200 Pa developed by conventional fans.", HYD, "HEDH 3.8.5 C")
@@ -1221,19 +1367,33 @@ class AirCooledModule(CondenserModule):
             r.check("Tower height", within(fan["H"], TOWER_HEIGHT_TYPICAL), f"H_eff = {fan['H']:.1f} m against HSB's order of 30 to 45 m.", HYD, "HSB Sec. 9.3.1.2")
             r.check("Natural draft economics", d.Q > 100e6, f"Q = {d.Q / 1e6:.3g} MW. HEDH: above 100 MW natural draft towers are more economical in most cases.", HYD, "HEDH 3.8.8")
         else:
-            if fan.get("area_ratio") is not None:
-                r.check("Face area to fan section", within(fan["area_ratio"], FAN_AREA_RATIO), f"S/S_v = {fan['area_ratio']:.2f} against 1.8 to 2.6.", GEO, "HSB Eq. 19.1; HEDH 3.8.7 Eq. (1)")
+            basis = "" if fan["diameter_entered"] else " The diameter is derived from this rule, so the ratio holds by construction."
+            r.check("Face area to fan section", within(fan["area_ratio"], FAN_AREA_RATIO), f"S/S_v = {fan['area_ratio']:.2f} against 1.8 to 2.6.{basis}", GEO, "HSB Eq. 19.1; HEDH 3.8.7 Eq. (1)")
+            how = "entered" if fan["diameter_entered"] else "derived at S/S_v = 2.2"
+            r.check("Fan diameter", within(fan["diameter"], FAN_DIAMETER_RANGE), f"D = {fan['diameter']:.2f} m, {how}, against the normal 1.8 to 4.1 m. Fans up to 1.5 m are often mounted on the motor shaft (HEDH 3.8.7 C). At least two fans per bay is desirable, so one failure leaves heat removal.", GEO, "HEDH 4.4.1-6")
+            how = "entered" if fan["tip_entered"] else "HEDH's 46-51 m/s mid value"
+            r.check("Fan tip speed", fan["tip"] <= TIP_SPEED_LIMIT, f"w = {fan['tip']:.1f} m/s, {how}, against the {TIP_SPEED_LIMIT:g} m/s safe upper limit. HEDH's average is {TIP_SPEED_AVERAGE[0]:g} to {TIP_SPEED_AVERAGE[1]:g} m/s, with cases as low as 25 m/s where noise limits apply.", MEC, "HEDH 4.4.1-6")
+            margin_min = MOTOR_MARGIN_MIN.get(f.blade_control)
+            if margin_min is None:
+                r.check("Motor margin", None, "Autovariable fans: HEDH states no oversize. Allow for transmission losses and winter air density (HEDH 4.9.2 Table 3).", MEC, "HEDH 3.8.7 C; HEDH 4.9.2 Table 3")
+            elif f.motor_power is not None:
+                margin = f.motor_power / fan["power"] - 1.0
+                r.check("Motor margin", margin >= margin_min, f"Installed {f.motor_power / 1e3:.3g} kW on {fan['power'] / 1e3:.3g} kW at the shaft: margin {100.0 * margin:.0f}%. HEDH asks for 25-30% with fixed blades and 15% with blades reset for summer and winter; this is {f.blade_control}, so at least {100.0 * margin_min:.0f}%.", MEC, "HEDH 3.8.7 C")
             else:
-                r.check("Face area to fan section", None, "No fan diameter given; the allowed diameter range is in the steps.", GEO, "HSB Eq. 19.1; HEDH 3.8.7 Eq. (1)")
+                r.check("Motor margin", True, f"Motor sized here at {100.0 * (MOTOR_MARGIN[f.blade_control] - 1.0):.0f}% above the shaft power: HEDH asks for 25-30% with fixed blades and 15% with blades reset for summer and winter. Enter the installed power to check a chosen motor.", MEC, "HEDH 3.8.7 C")
             if fan["dp_dyn_calculated"]:
                 r.check("Dynamic pressure", within(fan["dp_dyn"], DP_DYN_RANGE), f"dP_dyn = {fan['dp_dyn']:.0f} Pa against the source's 40 to 60 Pa. HEDH's own worked problem has 30 Pa, so this is a guide.", HYD, "HEDH 3.8.7 B")
             frac = fan["power"] / d.Q
             r.check("Fan power share", within(frac, FAN_POWER_FRACTION), f"N/Q = {100.0 * frac:.2f}% against the usual 1 to 3%.", HYD, "HEDH 3.8.7 B")
             r.check("Fan efficiency", 0.6 <= f.efficiency <= 0.7, f"eta = {f.efficiency:g} against the often-used 0.6 to 0.7.", HYD, "HEDH 3.8.7 B")
-            if "l_w" in fan:
-                r.check("Noise", None, f"L_w = {fan['l_n']:.0f} dB(A) for all fans. Approximate, for the fans only: motors and drives can add as much (HEDH 3.8.9 A gives levels, no prediction). No limit is in the sources.", MEC, S_NOISE)
-            else:
-                r.check("Noise", None, "Needs the fan diameter and tip speed, which are not given. The sources give equations but no limit.", MEC, S_NOISE)
+            basis = []
+            if not fan["diameter_entered"]:
+                basis.append(f"D = {fan['diameter']:.2f} m from the area rule (HEDH 3.8.7 Eq. 1)")
+            if not fan["tip_entered"]:
+                basis.append(f"w = {fan['tip']:.1f} m/s from HEDH 4.4.1-6's average")
+            basis_text = f" Basis: {'; '.join(basis)}." if basis else ""
+            r.check("Noise", None, f"L_w = {fan['l_n']:.0f} dB(A) for all fans.{basis_text} Approximate, for the fans only: motors and drives can add as much (HEDH 3.8.9 A gives levels, no prediction). The books give no regulatory limit.", MEC, S_NOISE)
+            r.check("Noise against the indicative maximum at 1 m", fan["l_1m"] <= fan["table_1m"], f"L_p = {fan['l_1m']:.0f} dB(A) 1 m from one fan by HEDH 3.8.9 Eq. (2), against {fan['table_1m']:.0f} dBA from HEDH 4.8.3 Table 8 at this tip speed. A guide only: Eq. (2) spreads from a point, and HEDH's own worked problem gives 94 dB(A) by this route against about 84 dBA.", MEC, "HEDH 4.8.3 Table 8; HEDH 3.8.9 Eq. (2)")
 
         # Fin attachment and winter
         if p.T_sat > CONTACT_T_C:
@@ -1247,5 +1407,5 @@ class AirCooledModule(CondenserModule):
             r.check("Freezing in winter", w.T_air_min > w.T_freeze, f"Lowest ambient {w.T_air_min:g} degC against freezing at {w.T_freeze:g} degC. If not above, the condensate can freeze. Remedies in the sources: preheating the air in winter (Lecture 23), the downflow-plus-upflow layout (HEDH 3.8.9 C) and air flow control (HEDH 3.8.7 E). This compares temperatures only, with no wall temperature calculation.", MEC, "Lecture 23; HSB Sec. 19.5.1; HEDH 3.8.9 C")
 
         # Code
-        r.check("API 661 and other air-cooled exchanger standards", None, "Not assessed. API 661 is the kind of standard that would govern air-cooled exchangers (bundle, header, fan and drive requirements). It is not available here, and no compliance is claimed.", MEC)
-        r.check("Header box, tube and pressure design", None, "Not assessed. Wall thickness, headers and thermal expansion (HSB Sec. 9.3.2 describes floating tube sheets) would fall under the pressure vessel code family (ASME VIII). It is not available here, and no compliance is claimed.", MEC, "HSB Sec. 9.3.2")
+        r.check("API 661 and other air-cooled exchanger standards", None, "Guidance only, as HEDH 4.4.1 quotes API 661, 2nd ed., 1978: fan tip clearance no greater than 0.5% of the fan diameter, with limits of 19 mm and 9.5 mm; plenum panels at least 1.9 mm flat or 1.5 mm ribbed; fan decks at least 2.7 mm; floor plates at least 6.4 mm. Outside this module's scope, and no compliance is claimed.", MEC, "HEDH 4.4.1-6, 4.4.1-7")
+        r.check("Header box, tube and pressure design", None, "Outside this module's scope: wall thickness, header, plug and thermal expansion design, which fall under the pressure vessel code family (ASME VIII). The books give practice, not design rules: plug headers are over 85% of headers and removable cover plates are limited to about 30 bar; tube supports at 1.83 m or less (HEDH 4.4.1, 4.9.2 Table 3); floating tube sheets (HSB Sec. 9.3.2). No compliance is claimed.", MEC, "HEDH 4.4.1; HEDH 4.9.2 Table 3; HSB Sec. 9.3.2")

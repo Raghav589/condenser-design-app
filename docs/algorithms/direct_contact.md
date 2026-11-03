@@ -2,11 +2,11 @@
 
 Code: `condenser_app/modules/direct_contact.py`. Tests: `tests/test_direct_contact.py`.
 
-The project's supplied algorithm is not available. This module rests on:
+Design basis, chosen because these are the published direct-contact methods:
 
-- **HSB Ch. 22 "Direct Contact Condensers"** (book pp. 725-745, PDF index 750-770). This chapter is the main source. It has four worked examples and is beyond the line ranges listed in the module brief; HSB Sec. 17.3.5 points to it.
+- **HSB Ch. 22 "Direct Contact Condensers"** (book pp. 725-745, PDF index 750-770). This chapter is the main source and has four worked examples. HSB Sec. 17.3.5 points to it.
 - **HSB Sec. 17.2, 17.3.5, Figs 17.18-17.20** (selection, spray and baffle column); HSB Sec. 21.5.2-21.5.4 (drop force balance, flooding); HSB Eq. 18.15 (desuperheating duty); HSB Ch. 16 (y = p/P).
-- **HEDH Sec. 2.6.8** (Jacobs; PDF index 684-699). HEDH Sec. 3.4.2 and 3.5.4 only mention direct-contact condensers.
+- **HEDH Sec. 2.6.8** (Jacobs; PDF index 684-699), for the design limits below. Symbols follow the handbook's general nomenclature, pp. xxi-xxv (PDF index 24-28). HEDH Sec. 3.4.2 and 3.5.4 only mention direct-contact condensers.
 - **Lecture 23** sheet 4: jet, spray, bubble column and pool, with contamination as the major concern.
 
 All equations were read from page images.
@@ -28,7 +28,23 @@ Give exactly two of: vapour flow, coolant flow, coolant outlet (temperature or u
 
 T_Le is the coolant temperature of HEDH Eq. (1), and is what "allowable coolant outlet temperature" means. T_mix is slightly higher, because the condensate joins at T_sat. Example 22.3 reports T_Le (95.7 degC); T_mix is 95.81 degC.
 
+### Design limits (HEDH 2.6.8), reported as checks
+
+| Check | Criterion | Applies to | Source |
+|---|---|---|---|
+| Terminal approach | T_sat - T_Le >= 1 degC | every type | Hausbrand and How, HEDH 2.6.8-4 |
+| Coolant rise | about 30 degC | spray, jet, sheet, fan, baffle | HEDH 2.6.8-3 |
+| Typical drop size | 125 to 520 um | spray | HEDH 2.6.8-3 |
+| Packed bed vapour velocity | below about 4 m/s (12 ft/s), on the entered or sized section | packed bed | HEDH 2.6.8-10 |
+| Bed height above the U_v lower bound | Z >= Z_v,min at 2.79e6 W/m3.K | packed bed, U_v empty | HEDH 2.6.8-10 |
+| Measured U_v | <= 2.79e6 W/m3.K | packed bed, U_v entered | HEDH 2.6.8-10 |
+| Bubble subcooling | T_sat - T_coolant,in > 2 degC pure, > 3.5 degC with gas | bubble column | HEDH 2.6.8-14 |
+| Bubble radius | 5 mm radius with gas, unless the gas dissolves; a stated note for a pure vapour | bubble column | HEDH 2.6.8-14 |
+| Tail pipe | static column <= 34 ft = 10.36 m, the longer published length | barometric | HSB p. 725; HEDH Fig. 1 |
+
 ### Spray (HSB Sec. 22.4.1; HEDH 2.6.8 A(a))
+
+Design basis: one drop at the maximum drop size. HEDH recommends this for preliminary design or when the distribution parameters are unknown, and HSB says a larger size is conservative. The entered size is checked against HEDH's typical 125 to 520 um.
 
 1. Ja = rho_c h_fg/[rho_L c_pL (T_sat - T_Li)], HEDH Eq. (13). Check Ja > 20.
 2. Fo = -ln(1 - theta^2)/pi^2, inverted HSB Eq. 22.9. t = Fo R^2/K_L.
@@ -37,7 +53,7 @@ T_Le is the coolant temperature of HEDH Eq. (1), and is what "allowable coolant 
 5. x_g: integrate Eq. 22.1 with gravity and Eq. 22.4 by RK4, doubling the steps until the distance moves by under 0.01 mm.
 6. H = max(x, x_g). Reason: the drop needs the same time, and travels further under gravity (see Source errors, item 5).
 7. D'/D = (1 + theta/Ja)^(1/3), Eq. 22.14. Check under 3%.
-8. Optional cross-section (hydraulic, geometric): terminal velocity of the smallest drop, Eq. 21.36, with fixed-point iteration on C_D(Re) from Eq. 22.4, or a user C_D from Fig. 2.42. S = M_v/(rho_v f V_t). The fraction f is the user's: HEDH says only "a fraction".
+8. Optional cross-section (hydraulic, geometric): terminal velocity of the smallest drop, Eq. 21.36, with fixed-point iteration on C_D(Re) from Eq. 22.4, or a user C_D from Fig. 2.42. S = M_v/(rho_v f V_t). No book gives the fraction f: HEDH says only "a fraction". It is a design input, like the smallest drop, which comes from the nozzle data.
 
 ### Jet, sheet, fan (HSB Sec. 22.4.2, Table 22.1; HEDH 2.6.8 A(b))
 
@@ -53,13 +69,13 @@ The switch at 0.45 is where the two asymptotes cross, computed from these equati
 
 Fan: delta = V_dot/(phi x u), HEDH Eq. (32), in Gz = (2 delta)^2 u/(K x), Eq. (30), gives x = [4 V_dot^2/(phi^2 u K Gz)]^(1/3). Jets and sheets also report the jet count or total width by continuity.
 
-### Baffle column (an estimate, see Gaps)
+### Baffle column (built from sourced parts)
 
-Each fall is a sheet: Gz = (2w)^2 u/(K_L x_s), then theta_s from the sheet row above. Mixed after each stage: T_n+1 = T_n + theta_s (T_sat - T_n), marched to T_Le. N is checked against ln(1 - theta)/ln(1 - theta_s). H = N x_s. Sheet theory: HEDH A(b), which names the cascade condenser. Mixing: HEDH 2.6.8, stated for packing layers and extended there to tray condensers.
+No baffle column stage procedure is published. The module's count is built from sourced parts, and is labelled a preliminary estimate. Each fall is a sheet: Gz = (2w)^2 u/(K_L x_s), then theta_s from the sheet row above. Mixed after each stage: T_n+1 = T_n + theta_s (T_sat - T_n), marched to T_Le. N is checked against ln(1 - theta)/ln(1 - theta_s). H = N x_s. Sheet theory: HEDH A(b), which names the cascade condenser. Mixing: HEDH 2.6.8, stated for packing layers and extended there to tray condensers.
 
 ### Packed bed (HSB Sec. 22.4.3)
 
-C = M_L c_pL/(M_G c_pG), Eq. 22.27. Da = 6(1 - voidage) for spheres, otherwise D a. H = (2.5 C^0.21/Da)^3, Eq. 22.33b. Z = H D. S from column_area or v_lim = 4 m/s (HEDH 2.6.8 B). Then Ja, St (Eq. 22.24), alpha, surface, and the closure check of Example 22.3. With a measured U_v: Z_v from HEDH Eq. (65).
+C = M_L c_pL/(M_G c_pG), Eq. 22.27. Da = 6(1 - voidage) for spheres, otherwise D a. H = (2.5 C^0.21/Da)^3, Eq. 22.33b. Z = H D. S from column_area or v_lim = 4 m/s (HEDH 2.6.8 B). Then Ja, St (Eq. 22.24), alpha, surface, and the closure check of Example 22.3. With a measured U_v: Z_v from HEDH Eq. (65). With U_v empty, the same equation at HEDH's largest reported value, 2.79e6 W/m3.K on small conventional packings, gives `height_volumetric_min`. That is the book's upper value, so the height is a lower bound and not a design height: 9.5 mm for the Example 22.3 flows, against the 0.206 m bed.
 
 ### Bubble column (HSB Sec. 22.4.4; HEDH 2.6.8 C)
 
@@ -68,11 +84,11 @@ C = M_L c_pL/(M_G c_pG), Eq. 22.27. Da = 6(1 - voidage) for spheres, otherwise D
 3. Fo_c = 2 sqrt(pi)/(3 sqrt(K_v) Ja' Pe^(1/2)), Eq. 22.43. t = Fo D_0^2/(4 K_L). z = v t.
 4. Stationary comparison, Eq. 22.35 at beta = 0.1.
 5. Stepped collapse with v(D) at each stage, Eq. 22.41, as Example 22.4's closing remark suggests. Diameter steps are doubled until the time moves under 0.01%.
-6. Column height, if f and L are given: HEDH Eq. (87), or Eq. (88) with gas and beta_f. Nozzle count by continuity. Plan area on a square pitch (assumption).
+6. Column height, if f and L are given: HEDH Eq. (87), or Eq. (88) with gas and beta_f. Nozzle count by continuity. Plan area on a square pitch.
 
 ### Pool, and barometric tail pipe
 
-Pool: **balances only**. Discrete bubbles can be sized with `bubble_column`. Tail pipe (optional, hydraulic): H_tail = (p_atm - P)/(rho_m g), static column only. Hydrostatics; HSB and HEDH describe it and show about 10 m (34 ft).
+Pool: **balances only**. Discrete bubbles can be sized with `bubble_column`. Tail pipe (optional, hydraulic): H_tail = (p_atm - P)/(rho_m g), static column only. Hydrostatics. It is compared with HSB p. 725's "about 10 m" and HEDH Fig. 1's "about 34 feet" (10.36 m), and passes when the longer published length holds the column. The difference is not a sized margin.
 
 ## Variable map
 
@@ -94,6 +110,24 @@ Pool: **balances only**. Discrete bubbles can be sized with `bubble_column`. Tai
 | U_v | `packed.U_v` | W/m3.K | thermal |
 | D_0, T_inf | `bubble.bubble_diameter`, `T_pool` | m, degC | thermal |
 | f, L, beta_f | `bubble.release_frequency`, `nozzle_spacing`, `beta_final` | 1/s, m, - | geometric |
+| U_inf (Eqs 87-88) | rise velocity `v`, from `bubble.rise_velocity` or the force balance | m/s | hydraulic |
+
+## Nomenclature
+
+HEDH Sec. 2.6.8 refers to a table at the beginning of Part 2. That table is not in the PDF (PDF index 165-167 are dividers and Sec. 2.1.0). The handbook's general nomenclature is, at pp. xxi-xxv (PDF index 24-28).
+
+| Symbol | Status in the PDF | How the module reads it |
+|---|---|---|
+| f | Frequency, 1/s, p. xxii | Bubble release frequency per nozzle |
+| L, D, l, d, s | Length or diameter, m, p. xxii | L in Eqs (87)-(88) is the nozzle spacing; Figs 23-24 give only L/2R_0 = 1.25 |
+| xi | Drag coefficient, p. xxiii | Not used; appears in Dimic's Eqs (85)-(86) |
+| Re, Pe, Fo, Ar | Re = ul/nu, Pe = ul/kappa, Fo = kappa t/l^2, Ar = g l^3 drho/(nu^2 rho), p. xxv; l is not specified | Pe on the initial diameter, as HSB Eq. 22.44 |
+| Ja', Fo, beta, Ja* | Defined in the section, 2.6.8-13 | As defined |
+| w_o | "Rise velocity of the bubble", 2.6.8-14 | Dimic's Eqs only, not used |
+| U_inf | Undefined. U alone is the overall coefficient, p. xxiii, which cannot be meant here | The bubble rise velocity |
+| Ja*_0 (Eq. 88) | Undefined | Ja* at the coolant inlet |
+| Re_f (Eqs 55, 56, 62, 63) | Undefined. Re_DHf appears in Eqs (47), (53), (57) | The film Reynolds number on the hydraulic diameter. Not used in a calculation |
+| H_d (Eqs 79-80), a (Eq. 84) | Undefined | Dimic's Eqs (79)-(86) are outside this module's scope |
 
 Shared property groups are not reused: they require values these methods never use, and Example 22.1 does not give them.
 
@@ -142,28 +176,28 @@ Not in the book: with gravity, Example 22.1 needs 2.15 m rather than 1.62 m. Ste
 7. **HSB Eq. 22.42** prints D_0^3 for D_0^(3/2) (integrate Eq. 22.41). The example is headed "12.4", and its method cites Eq. 22.44 for Eq. 22.43.
 8. **HSB Example 22.4** uses 4709 for c_pL. See the table.
 9. **HSB Eqs 21.37 and 21.39** print sqrt(4/(6 C_D)). The force balance of Eq. 21.36 gives sqrt(4/(3 C_D)), and Example 22.4's 1.63 = sqrt(4/(3 x 0.5)) confirms it. The module uses Eq. 21.36.
-10. **Fan assumption.** HSB Sec. 22.4.2 says fan velocity falls as 1/x. HEDH Eq. (32) keeps u constant and thins the sheet. Solving the conduction problem with delta proportional to 1/x reproduces exp(-4 pi^2/(3 Gz)) exactly, so HEDH's version is used.
+10. **Fan velocity.** HSB Sec. 22.4.2 says fan velocity falls as 1/x. HEDH Eq. (32) keeps u constant and thins the sheet. Solving the conduction problem with delta proportional to 1/x reproduces exp(-4 pi^2/(3 Gz)) exactly, so HEDH's version is used.
 11. **HEDH Eq. (12)** places the 1/3 exponent ambiguously. HSB Eq. 22.14 and mass conservation give (R/R_0)^3 = 1 + theta/Ja. **HEDH Eq. (32)** is called "per unit width", but phi x delta u is a total flow.
 12. **HEDH Figs 25-26** label their axes Pe where Eqs (87)-(88) have Pe^(1/2). A rough check against Fig. 24 supports Pe^(1/2): about 3.4 cm at 2 degC, against the plotted few cm. That check used pentane and water properties from general knowledge, so it is only a plausibility check.
 13. **Lecture 23** captions HSB Fig. 17.20 "A Bubble Column". HSB calls it a baffle column, with vapour as the continuous phase. The module uses HSB's meaning.
 
 Not an error, but worth knowing: **Eq. 22.4** gives C_D = 0.56 at Re = 100, while the sphere curve of HSB Fig. 2.42 reads about 1. Low drag gives a low deceleration and a high terminal velocity, so the entrainment limit is less conservative than a rigid-sphere value. Enter C_D from Fig. 2.42 if in doubt.
 
-## Gaps and limits
+## Scope and stated choices
 
-- **Baffle column has no source procedure.** The count is a labelled estimate built from sheet theory and the mixing assumption. HSB Fig. 17.20 shows broken drops rather than a solid curtain. Curtain thickness and velocity have no source and are inputs. Baffle cut, column area and flooding: none.
-- **Pool: balances only.** HEDH says large vapour jets need experimental data. Eq. (89), St = 6.5 Re^-0.4, is for coaxial jets at high subcooling and is not used.
-- **Spray:** nozzle drop size and velocity are inputs. Drop distribution Eqs (5)-(8) need nozzle parameters and are not implemented. Ja < 20 needs the nonlinear problem of Eqs (9)-(11), which is not solved; the module warns. A different condensate: HSB says the model is not adequate, and HEDH gives only Figs 9-10.
-- **Moderate-Ja sheets:** HEDH Eqs (62)-(63) are recommended there for design but not used. Re_f is undefined without the nomenclature. With Re_f = Re_DH and Pr about 1.9 (general knowledge, not in the example), Eq. (63) gives about 57 m for Example 22.2, against 1.69 m for 95%. **The project drive should confirm this.** Eqs (45)-(61) are not implemented.
-- **Non-condensable gas:** HEDH has no procedure for sprays other than the partial-pressure rule. T_sat at the partial pressure and p_v at the vent are user inputs, because no saturation data are in the module. Figs 13-14 and Eqs (73)-(74) are not implemented. The vent mole balance is not a printed equation.
-- **HEDH nomenclature:** the text says it is at the beginning of Part 2. It is not in the available scan (PDF index 164-167 checked). In Eqs (87)-(88), f, U and L are read as release frequency, rise velocity and nozzle spacing, and Pe as based on D_0. Their data are for pentane and isobutane in water.
-- **Bubbles under 1.5 mm radius:** Eqs (79)-(86) use undefined symbols and are not implemented. Inertia-controlled collapse at high subcooling: no procedure. C_D is held at 0.5 while stepping.
-- **Packed bed:** the correlation's range is not stated. Flooding (Fig. 21.19, Eq. 21.40) needs a chart and a packing factor and is NOT_ASSESSED. U_v data are not in the sources.
-- **Not sized:** separator or decanter, nozzles and distributors, pressure drops, hot well, tail pipe friction and seal margin.
-- **Not assessed:** vessel code (ASME VIII family) and HEI direct-contact standards. These were not available.
-- **Properties:** constant, entered by the user. No property iteration, because the module holds no property data. HSB Problem 4 says to iterate on the mean temperature; re-enter and re-run.
-- Spray injection is assumed vertically downward (HSB Fig. 22.6). Vapour velocity is neglected in the drop path.
-
-## What the project drive should confirm
-
-Whether its algorithm uses T_Le or T_mix as the outlet temperature; its treatment of gravity in the drop path; a baffle-column procedure; the definition of Re_f in HEDH Eqs (62)-(63); drop size data; and the Part 2 nomenclature for HEDH Sec. 2.6.8.
+- **Outlet temperature.** T_Le is the coolant temperature of HEDH Eq. (1) and is what the allowable outlet means. T_mix is reported beside it from the first law.
+- **Gravity in the drop path.** The height is the larger of the gravity-free and the gravity-integrated distance, because the drop needs the same time and travels further under gravity (Source errors, item 5).
+- **Fraction of terminal velocity.** No book gives it. HEDH says "a fraction". It is a design input, and without it no spray cross-section is sized.
+- **Drop distribution.** The parameters a, delta and D_max of HEDH Eqs (5)-(8) come from nozzle makers, and no book gives values. Outside this module's scope: integrating over the spray. The design basis is the maximum drop size.
+- **Baffle column.** No stage procedure is published. The count is built from sheet theory and complete mixing between stages. HSB Fig. 17.20 shows broken drops rather than a solid curtain. Curtain thickness and velocity are design inputs. Outside this module's scope: baffle cut, column area and flooding, for which no book gives a number.
+- **Pool: balances only.** HEDH says large vapour jets need experimental data. Eq. (89), St = 6.5 Re^-0.4, is for coaxial jets at high subcooling and is not used. Outside this module's scope: pool sizing.
+- **Spray limits.** Ja < 20 needs the nonlinear problem of Eqs (9)-(11), which is not solved; the module warns. A different condensate: HSB says the model is not adequate, and HEDH gives only Figs 9-10.
+- **Moderate-Ja sheets.** HEDH Eqs (62)-(63) correlate the length for complete utilization of the coolant, within 7% (2.6.8-9/10). The module sizes to a stated utilization below 1, where Eq. 22.17 and Example 22.2 apply, so Eqs (62)-(63) do not set the height and are not comparable with a 95% height. Outside this module's scope: Eqs (45)-(61), which need a numerical solution.
+- **Non-condensable gas.** HEDH has no procedure for sprays other than the partial-pressure rule. T_sat at the partial pressure and p_v at the vent are inputs, because the module holds no saturation data. Figs 13-14 and Eqs (73)-(74) are not implemented. The vent mole balance is not a printed equation.
+- **Bubble train data.** Figs 25-26 are for pentane and isobutane in water.
+- **Bubbles under 1.5 mm radius.** Outside this module's scope: Eqs (79)-(86) use H_d and a, which the PDF leaves undefined. Inertia-controlled collapse at high subcooling has no procedure. C_D is held at 0.5 while stepping.
+- **Packed bed.** HSB states no range for Eq. 22.24; its one worked case is Example 22.3. Flooding (Fig. 21.19, Eq. 21.40) needs a chart and a packing factor and is NOT_ASSESSED. HEDH references packing U_v data and does not print them; its one number is the upper value used for the lower bound.
+- **Outside this module's scope:** separator or decanter, nozzles and distributors, pressure drops, hot well, tail pipe friction, seal margin and diameter. No book gives an allowance for the tail pipe.
+- **Outside this module's scope:** vessel code (ASME VIII family) and the HEI direct-contact standards. HEDH 3.5.4 C cites the HEI standards and quotes no numbers. No compliance is claimed.
+- **Properties.** Constant, entered by the user. No property iteration, because the module holds no property data. HSB Problem 4 says to iterate on the mean temperature; re-enter and re-run.
+- Spray injection is vertically downward (HSB Fig. 22.6). Vapour velocity is neglected in the drop path.

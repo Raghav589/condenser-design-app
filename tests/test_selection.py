@@ -110,6 +110,13 @@ def test_form_shows_only_questions_on_the_path():
     assert {"q9_horizontal", "q10_high_p_corrosive", "q11_low_dp"} <= deep and "q12_coolant_tube_side" not in deep
 
 
+def test_result_states_its_design_basis():
+    result = run_design("selection", SelectionInputs(**PATHS["Spray condenser"]))
+    assert any(a.startswith("Design basis: HSB Fig. 17.1") for a in result.design_basis)
+    text = " ".join(result.design_basis + result.scope_limits).lower()
+    assert "supplied" not in text and "project drive" not in text and "not available" not in text
+
+
 def test_stale_answer_off_the_path_is_hidden():
     # q2 answered earlier, then q1 changed to process: q2 is no longer on the path.
     module = get_module("selection")

@@ -3,8 +3,9 @@
 Primary path: co-current vertical in-tube downflow with the coolant on the baffled shell side (HSB Fig. 17.4, Fig. 18.6;
 HEDH 3.4.3A, 3.4.9B). Variants: condensation outside vertical tubes in an unbaffled shell (HEDH 3.4.9F(a)) and the reflux
 condenser (HSB Sec. 18.5; HEDH 3.4.9C). Condensing side: HSB Secs. 16.3, 18.2, 18.3 through common.condensation.
-Coolant on the shell side: Bell-Delaware in the equation form of HEDH 3.3.5 to 3.3.8. No worked vertical condenser example exists
-in the supplied material; see docs/algorithms/vertical_shell_tube.md for that and for the sub-path benchmarks.
+Coolant on the shell side: Bell-Delaware in the equation form of HEDH 3.3.5 to 3.3.8. Preliminary mechanical sizing and vibration
+screening: common.mechanical, from HEDH Part 4. No source works a complete vertical shell-and-tube condenser example; see
+docs/algorithms/vertical_shell_tube.md for that and for the sub-path benchmarks.
 """
 from __future__ import annotations
 
@@ -35,6 +36,37 @@ from ..common.condensation import (
     vertical_downflow_local,
 )
 from ..common.iteration import fixed_point
+from ..common.mechanical import (
+    BETA_LOWEST,
+    CARBON_STEEL,
+    F_FLOATING_GASKETED,
+    LOG_DECREMENT,
+    STANDARD_SHELLS_MM,
+    STAINLESS_304,
+    TUBE_LENGTH_RANGE,
+    TUBE_METALS,
+    acoustic_frequency,
+    added_mass_coefficient,
+    buffeting_frequency,
+    critical_velocity,
+    cylinder_thickness,
+    effective_mass,
+    frequency_constant,
+    interpolate,
+    natural_frequency,
+    next_standard_shell,
+    smallest_table_2a_shell,
+    strouhal_number,
+    table_2a_counts,
+    tema_minimum_shell,
+    tube_moment_of_inertia,
+    tube_thickness_internal,
+    tubesheet_bending,
+    tubesheet_rough,
+    tubesheet_shear_margin,
+    typical_tube_wall,
+    vortex_shedding_frequency,
+)
 from ..common.properties import saturated, saturated_vapour, saturation_pressure, water_liquid
 from ..common.references import cite
 from ..common.singlephase import darcy_f, dittus_boelter, gnielinski, laminar_nu, pipe_dp, prandtl
@@ -86,22 +118,48 @@ WEB_MIN = 3.2e-3  # m, HSB 6.2.5
 BAFFLE_MIN = 50.8e-3  # m, Lecture 9 (2 in); HSB 6.2.6 and HEDH 3.3.5 item 12 say 50 mm
 TOTAL_J_MIN = 0.4  # HEDH 3.3.8A: "never be less than 0.4, and preferably >= 0.5"
 J_L_MIN = 0.6  # HEDH 3.3.6J
+NONCONDENSABLE_LIMIT = 5.0  # wt%, HEDH 3.4.9B: 1 - 0.18 C below 5%; no simple method between 5 and 80%
+
+HEAD_FIXED, HEAD_SPLIT = "fixed tubesheet", "split ring or packed floating head"
+HEAD_PULL_1000, HEAD_PULL_2000 = "pull-through floating head, 1000 kPa", "pull-through floating head, 2000 kPa"
+HEAD_TYPES = (HEAD_FIXED, HEAD_SPLIT, HEAD_PULL_1000, HEAD_PULL_2000)
+# HEDH Fig. 3.3.5(14), L_bb [mm] against D_s [mm], pixel-digitised from the page image, +-0.5 mm. Curves start near D_s = 200 mm and end at 2500 mm; the 2000 kPa curve leaves the chart at 160 mm.
+FIG_14_D_S = (250, 400, 500, 600, 800, 1000, 1200, 1400, 1500, 1600, 1800, 2000, 2200, 2500)
+FIG_14_L_BB = {
+    HEAD_FIXED: tuple(zip(FIG_14_D_S, (13.9, 14.8, 15.3, 15.9, 16.8, 17.9, 18.8, 19.85, 20.2, 20.6, 21.9, 22.7, 23.75, 25.2))),
+    HEAD_SPLIT: tuple(zip(FIG_14_D_S, (29.8, 32.3, 34.0, 35.8, 39.1, 42.5, 45.9, 49.2, 50.8, 52.5, 56.0, 59.35, 62.8, 67.9))),
+    HEAD_PULL_1000: tuple(zip(FIG_14_D_S, (87.8, 89.9, 91.6, 93.6, 98.3, 103.9, 110.4, 117.1, 120.7, 124.15, 131.3, 138.75, 146.3, 158.1))),
+    HEAD_PULL_2000: tuple(zip(FIG_14_D_S[:11], (91.4, 96.1, 99.5, 103.2, 111.0, 119.5, 127.9, 136.3, 140.4, 144.6, 153.1))) + ((1960, 160.0),),
+}
+# HEDH Fig. 3.3.5(4), recommended baffle cut B_c [%] against L_bc/D_s, read from the page image against the gridlines, +-1% B_c and +-0.02 in the ratio.
+# SBC: segmental baffle cuts in no-phase-change flow, the shell-side coolant here. Centre line pixel-digitised (+-0.3%), hatched band read by eye.
+FIG_4_SBC_CENTRE = ((0.20, 20.0), (0.30, 21.9), (0.40, 24.0), (0.50, 26.1), (0.65, 29.2), (0.75, 31.4), (1.00, 36.4))
+FIG_4_SBC_LOW = ((0.20, 18.3), (0.25, 18.7), (0.33, 20.2), (0.42, 21.5), (0.49, 23.7), (0.58, 25.2), (0.65, 28.7), (0.75, 30.9), (1.00, 35.9))
+FIG_4_SBC_HIGH = ((0.20, 22.2), (0.31, 24.5), (0.47, 27.0), (0.55, 29.4), (0.62, 30.9), (0.71, 31.6), (0.78, 33.8), (0.91, 36.7), (1.00, 38.2))
+# CV: baffle cuts applicable to condensing vapour on the shell side.
+FIG_4_CV_LOW = ((0.22, 31.0), (0.325, 31.5), (0.38, 32.3), (0.44, 32.9), (0.54, 34.0), (0.655, 35.6), (0.79, 37.3), (0.91, 38.7), (1.00, 40.0))
+FIG_4_CV_HIGH = ((0.22, 31.0), (0.27, 34.4), (0.335, 38.7), (0.37, 41.5), (0.39, 43.3), (0.42, 45.0), (1.00, 45.0))
+FIG_4_READ = 1.0  # % B_c, the read uncertainty, allowed for in the pass or fail
+FIG_4_RATIO = {"SBC": (0.20, 1.00), "CV": (0.22, 1.00)}
+LAYOUT_ANGLE = {LAYOUT_30: 30, LAYOUT_45: 45, LAYOUT_90: 90}
+ROW_PITCH = {LAYOUT_30: (0.866, 1.0), LAYOUT_45: (0.707, 1.414), LAYOUT_90: (1.0, 1.0)}  # (p_l, p_t)/L_tp: rows along the flow and pitch across it, HEDH 3.3.5 Table 10 and Fig. 4.6.3(1)
 
 
 # --------------------------------------------------------------------------------------------- inputs
 @dataclass
 class BundleGeometry:
     D_o: float | None = inp("Tube outside diameter", "m", display_unit="mm", minimum=0, exclusive_minimum=True, help="HEDH 3.4.3A: usually 19 or 25 mm for downflow, up to 50 mm at low pressure. Lecture 9 lists 15.88, 19.05, 25.4, 31.75 mm. HEDH 3.4.3B: reflux 25 mm or more.", source="Lecture 9; HEDH 3.4.3")
-    t_wall: float | None = inp("Tube wall thickness", "m", display_unit="mm", minimum=0, exclusive_minimum=True, help="Lecture 9: 2.11 mm (carbon steel) or 1.65 mm (stainless, copper alloy) for 19.05 mm tube; 2.77 or 2.11 mm for 25.4 mm tube.", source="Lecture 9")
+    t_wall: float | None = inp("Tube wall thickness", "m", display_unit="mm", minimum=0, exclusive_minimum=True, help="Lecture 9 and HEDH 4.2.5-1: 2.11 mm (carbon steel) or 1.65 mm (stainless, copper alloy) for 19.05 mm tube; 2.77 or 2.11 mm for 25.4 mm tube.", source="Lecture 9; HEDH 4.2.5-1")
     k_wall: float | None = inp("Tube wall conductivity", "W/m.K", minimum=0, exclusive_minimum=True, help="HEDH 3.3.5 Table 7: carbon steel 38, low alloy 30, high alloy and titanium 18, 90-10 Cu-Ni 65, 70-30 Cu-Ni 40, Admiralty 120, aluminium 180, copper 310.", source="HEDH 3.3.5 Table 7")
     L: float | None = inp("Effective tube length available", "m", minimum=0, exclusive_minimum=True, help="Length between the tubesheets, used as the available heat transfer length. Lecture 9: 3.6 to 11 m. HEDH 3.4.3B: reflux condensers usually 2 to 3 m.", source="Lecture 9; HEDH 3.3.5 items 8-10")
     pitch: float | None = inp("Tube pitch", "m", display_unit="mm", minimum=0, exclusive_minimum=True, help="At least 1.25 D_o. With a fouling shell-side fluid the gap must be at least 6.35 mm (Lecture 9). 1.25 to 1.5 D_o is the validity range of the shell-side method (HEDH).", source="Lecture 9; HEDH 3.3.5 item 6")
     layout: str | None = inp("Tube layout", choices=LAYOUTS, default=LAYOUT_30, help="HEDH 3.3.5 item 7: 30 deg has the highest density but no external mechanical cleaning. 45 and 90 deg allow cleaning if the gap is sufficient.", source="HEDH 3.3.5 Table 10")
     material_group: str | None = inp("Tube material group for the TEMA span", choices=(MATERIAL_A, MATERIAL_B), default=MATERIAL_A, source="HEDH 3.3.5 Eqs. (10a)-(10d); HSB Table 6.1")
     shell_fouling: str | None = inp("Is the shell-side fluid fouling?", choices=("yes", "no"), default="no", help="Sets the 6.35 mm gap check. HSB Sec. 17.3.1 warns that a fouling coolant on the shell side of a vertical tube-side condenser is hard to clean.", source="Lecture 9")
-    L_bb: float | None = inp("Bundle-to-shell diametral clearance L_bb", "m", display_unit="mm", minimum=0, help="D_s - D_otl. Read from HEDH Fig. 3.3.5(14): fixed tubesheet or U tube about 15 mm at D_s = 500 mm and 20 mm at D_s = 1200 mm; split ring or packed floating head about 35 to 50 mm. Given only as a chart, so it is an input.", source="HEDH 3.3.5 item 21, Fig. 14")
-    L_tb: float | None = inp("Tube-to-baffle diametral clearance L_tb", "m", display_unit="mm", minimum=0, required=False, help="Required with a baffled shell. HEDH Fig. 3.3.5(12), TEMA: 0.8 mm when the maximum unsupported span is below 900 mm. HSB Ex. 6.1 uses 0.8 mm.", source="HEDH 3.3.5 item 19")
-    L_sb: float | None = inp("Shell-to-baffle diametral clearance L_sb", "m", display_unit="mm", minimum=0, required=False, help="Optional. Omitted: L_sb = 3.1 mm + 0.004 D_s, the TEMA average plus 1.5 mm.", source="HEDH 3.3.5 Eq. (19)")
+    head_type: str | None = inp("Bundle type", choices=HEAD_TYPES, default=HEAD_FIXED, help="Sets the default L_bb (HEDH Fig. 3.3.5(14)), the tubesheet method and the tube length range. Pull-through pressures are the shell-side design pressure. U tubes share the fixed curve in the chart but are not offered: a U tube has at least two passes and this module is one pass.", source="HEDH 3.3.5 items 18, 21")
+    L_bb: float | None = inp("Bundle-to-shell diametral clearance L_bb", "m", display_unit="mm", minimum=0, required=False, help="D_s - D_otl. Leave blank for HEDH Fig. 3.3.5(14) at the bundle type: fixed tubesheet 15.3 mm at D_s = 500 mm, split ring or packed 34 mm, pull-through 92 to 100 mm. An entered value wins; use the drawing if there is one.", source="HEDH 3.3.5 item 21, Fig. 14")
+    L_tb: float | None = inp("Tube-to-baffle diametral clearance L_tb", "m", display_unit="mm", minimum=0, required=False, help="Leave blank for HEDH Fig. 3.3.5(12), TEMA: 0.8 mm if the longest unsupported span (2 L_bc) is at most 900 mm or the tube is above 31.75 mm; otherwise 0.4 mm. An entered value wins.", source="HEDH 3.3.5 item 19, Fig. 12; HEDH 4.2.5-7")
+    L_sb: float | None = inp("Shell-to-baffle diametral clearance L_sb", "m", display_unit="mm", minimum=0, required=False, help="Leave blank for L_sb = 3.1 mm + 0.004 D_s, the line HEDH captions on Fig. 13: the TEMA curve (Eq. 18, 1.6 mm + 0.004 D_s) plus 1.5 mm for out-of-roundness, a greater safety factor for heat transfer but a lower one for pressure drop. Enter a value to override it.", source="HEDH 3.3.5 Eqs. (18), (19)")
     N_ss: float | None = inp("Sealing strip pairs per baffle", minimum=0, default=0, help="HEDH 3.3.5 item 17: consider them above about 30 mm of L_bb; one per four to six rows crossed.", source="HEDH 3.3.5 item 17")
     baffle_cut: float | None = inp("Segmental baffle cut B_c", "%", minimum=5, maximum=49, default=25.0, help="Percent of D_s. HEDH: J_c fit holds for 15 to 45%. Kern's Eq. 6.1 is for 25% only.", source="HEDH 3.3.5 item 11")
     baffle_spacing_ratio: float | None = inp("Baffle spacing / shell diameter", minimum=0, exclusive_minimum=True, default=0.4, help="Used when no absolute spacing is given. The spacing follows the shell through the iteration, limited below by 50.8 mm and above by half the TEMA span.", source="Lecture 9; HEDH 3.3.5 item 12")
@@ -119,7 +177,8 @@ class VapourStream:
     T_out: float | None = inp("Condensate outlet temperature, if subcooled", "degC", minimum=-273.15, required=False, help="Optional. Below T_sat a falling-film subcooling zone is added. Not for reflux.", source="HSB Sec. 18.3.2; HEDH 3.4.6G")
     cp_v: float | None = inp("Vapour specific heat", "J/kg.K", minimum=0, exclusive_minimum=True, required=False, help="Needed with superheat or a condensation curve.", source="HSB Eq. 18.12")
     k_v: float | None = inp("Vapour thermal conductivity", "W/m.K", minimum=0, exclusive_minimum=True, required=False, help="Needed with superheat or a condensation curve.", source="HSB Eq. 18.11")
-    condensation_curve: str | None = inp("Mixture condensation curve (optional, downflow)", required=False, default="", help="User-supplied equilibrium table for Silver-Bell-Ghaly, rows separated by ';', each 'Q cumulative [W], T_eq [degC], vapour flow [kg/s]' from the vapour inlet, starting at Q = 0, at least 3 rows, vapour flow above 0 in every row. The equilibrium data are not calculated here. Leave empty for a pure vapour.", source="HSB Sec. 18.3.3; Ex. 16.13")
+    condensation_curve: str | None = inp("Mixture condensation curve (optional, downflow)", required=False, default="", help="Equilibrium table entered by the user for Silver-Bell-Ghaly, rows separated by ';', each 'Q cumulative [W], T_eq [degC], vapour flow [kg/s]' from the vapour inlet, starting at Q = 0, at least 3 rows, vapour flow above 0 in every row. The equilibrium data are not calculated here. Leave empty for a pure vapour.", source="HSB Sec. 18.3.3; Ex. 16.13")
+    noncondensable_wt_pct: float | None = inp("Non-condensable gas at the inlet", "%", minimum=0, default=0.0, help="Weight percent, below 5. Multiplies the condensing coefficient by 1 - 0.18 C, HEDH's first approximation. HEDH has no simple method between 5 and 80 wt%, so 5 and above is refused. Leave at 0 with a condensation curve.", source="HEDH 3.4.9B(a) item 1(b)")
 
 
 @dataclass
@@ -147,6 +206,18 @@ class SolverOptions:
 
 
 @dataclass
+class MechanicalInputs:
+    design_pressure_shell: float | None = inp("Design pressure, shell side", "Pa", display_unit="kPa", minimum=0, exclusive_minimum=True, required=False, help="Leave blank to skip the pressure sizing. HEDH 4.3.6 uses 2000 kPa.", source="HEDH 4.3.6")
+    design_pressure_tube: float | None = inp("Design pressure, tube side", "Pa", display_unit="kPa", minimum=0, exclusive_minimum=True, required=False, help="Leave blank to skip the pressure sizing. HEDH 4.3.6 uses 500 kPa.", source="HEDH 4.3.6")
+    allowable_stress: float | None = inp("Allowable stress S", "Pa", display_unit="MPa", minimum=0, exclusive_minimum=True, default=121e6, help="Default 121 MPa: SA-515-70 carbon steel plate at 100 degC, the value HEDH 4.3.6 uses. Enter the value for your material and temperature. HEDH 4.1.1 Eq. (1): S is the smallest of sigma_u/3, sigma_Y/1.5, sigma_R/1.5, sigma_T/1.1.", source="HEDH 4.3.6; HEDH 4.1.1")
+    joint_efficiency: float | None = inp("Weld joint efficiency E", minimum=0, exclusive_minimum=True, maximum=1, default=0.85, help="0.85 for spot examination, HEDH 4.3.6 quoting ASME UW-12. Seamless tube uses 1.", source="HEDH 4.3.6 Sec. C")
+    corrosion_allowance: float | None = inp("Corrosion allowance", "m", display_unit="mm", minimum=0, default=3e-3, help="Added to the shell and tubesheet. HEDH 4.3.6 uses 3 mm on each side.", source="HEDH 4.3.6")
+    gasket_diameter: float | None = inp("Tubesheet gasket mean diameter G", "m", display_unit="mm", minimum=0, exclusive_minimum=True, required=False, help="For a floating head. Blank: the shell ID is used, which is low; HEDH 4.3.6 has G = 678 mm in a 635 mm shell.", source="HEDH 4.3.6-13")
+    tube_metal: str | None = inp("Tube metal", choices=tuple(TUBE_METALS), default=CARBON_STEEL, help="Sets the typical wall of the Lecture 9 table, and E and the density of the vibration screen, from the 100 degC column of HEDH 5.5.12.", source="HEDH 5.5.12 Tables 1, 2, 4")
+    u_sound: float | None = inp("Speed of sound in the shell-side vapour", "m/s", minimum=0, exclusive_minimum=True, required=False, help="Shell-side vapour only, for the acoustic step of the vibration screen. Blank: that step is not assessed.", source="HEDH 4.6.4 Eq. (6)")
+
+
+@dataclass
 class VerticalShellTubeInputs:
     variant: str | None = inp("Configuration", choices=VARIANTS, default=DOWNFLOW, help="in_tube_downflow is the selection chart's 'vertical tube-side condenser'. shell_side_unbaffled is low-shear film condensation outside the tubes. reflux_upflow has vapour rising against the condensate, limited by flooding.", source="HSB Sec. 17.3.1")
     geometry: BundleGeometry = group("Tube bundle and baffles", BundleGeometry)
@@ -157,6 +228,7 @@ class VerticalShellTubeInputs:
     fouling: FoulingFactors = group("Fouling resistances", FoulingFactors)
     limits: PressureDropLimits = group("Allowable pressure drops", PressureDropLimits)
     velocity: VelocityLimits = group("Velocity limits", VelocityLimits)
+    mechanical: MechanicalInputs = group("Mechanical design, preliminary", MechanicalInputs)
     solver: SolverOptions = group("Options and solver", SolverOptions)
 
 
@@ -181,6 +253,41 @@ def max_unsupported_span(d_o: float, material_group: str) -> float | None:
     if material_group == MATERIAL_A:
         return (52.0 * d + 532.0 if d >= 19.0 else 68.0 * d + 228.0) * 1e-3
     return (46.0 * d + 436.0 if d >= 19.0 else 60.0 * d + 177.0) * 1e-3
+
+
+def bundle_clearance(head_type: str, d_s: float) -> float:
+    """L_bb [m] from HEDH Fig. 3.3.5(14) at the shell diameter. Held at the end of the curve outside the chart; shell_on_fig_14 tells the caller."""
+    return interpolate(FIG_14_L_BB[head_type], d_s * 1e3) * 1e-3
+
+
+def shell_on_fig_14(head_type: str, d_s: float) -> bool:
+    """Is D_s inside the digitised range of the curve? The curves start near 200 mm; the table starts at 250 mm, the first point read clear of the axis labels, and holds that value below it."""
+    return 0.2 <= d_s <= FIG_14_L_BB[head_type][-1][0] * 1e-3
+
+
+def tube_baffle_clearance(d_o: float, span: float) -> float:
+    """L_tb [m], HEDH Fig. 3.3.5(12), drilled holes, TEMA: 0.8 mm if the longest unsupported span is at most 900 mm or the tube is above 31.75 mm (HEDH 4.2.5-7: 0.794 mm at 914 mm), otherwise 0.4 mm. HEDH calls the step 'uncomfortable' but a reasonable guide. Extruded holes in shells below 350 mm are not assumed."""
+    return 0.8e-3 if span <= 0.9 or d_o > 31.75e-3 + 5e-5 else 0.4e-3
+
+
+def shell_baffle_clearance(d_s: float) -> float:
+    """L_sb [m] = 3.1 mm + 0.004 D_s, the line HEDH captions on Fig. 13: Eq. (18) plus 1.5 mm for out-of-roundness. HEDH 3.3.5 Eq. (19)."""
+    return 3.1e-3 + 0.004 * d_s
+
+
+def baffle_cut_region(kind: str, ratio: float) -> tuple[float, float] | None:
+    """(lowest, highest) B_c [%] of HEDH Fig. 3.3.5(4) at L_bc/D_s, for kind 'SBC' (no phase change) or 'CV' (condensing vapour). None outside the chart's region. The read uncertainty is FIG_4_READ."""
+    low, high = FIG_4_RATIO[kind]
+    if not low <= ratio <= high:
+        return None
+    if kind == "SBC":
+        return interpolate(FIG_4_SBC_LOW, ratio), interpolate(FIG_4_SBC_HIGH, ratio)
+    return interpolate(FIG_4_CV_LOW, ratio), interpolate(FIG_4_CV_HIGH, ratio)
+
+
+def noncondensable_factor(c_wt_pct: float) -> float:
+    """1 - 0.18 C on the condensing coefficient, C the inlet non-condensable weight percent below 5. HEDH 3.4.9B(a) item 1(b)(i), which calls it a first approximation."""
+    return 1.0 - 0.18 * c_wt_pct
 
 
 # ------------------------------------------------------------------------------- shell-side coolant
@@ -256,7 +363,7 @@ def bell_delaware(
     L_pp, L_tp_eff = pp_factor * pitch, eff_factor * pitch
     d_otl = D_s - L_bb  # Eq. 3.3.5(20a)
     d_ctl = d_otl - D_t if d_ctl is None else d_ctl  # Eq. 3.3.5(21)
-    L_sb = 3.1e-3 + 0.004 * D_s if L_sb is None else L_sb  # Eq. 3.3.5(19)
+    L_sb = shell_baffle_clearance(D_s) if L_sb is None else L_sb  # Eq. 3.3.5(19)
     cut = baffle_cut / 100.0
 
     S_m = L_bc * (L_bb + d_ctl / L_tp_eff * (pitch - D_t))  # Eq. 3.3.5(22)
@@ -569,6 +676,37 @@ class _Evaluation:
     G_crit_hsb: float = 0.0
     G_crit_hedh: float = 0.0
     C_hedh: float = 0.0
+    # clearances actually used: entered, or the HEDH defaults
+    L_bb: float = 0.0
+    L_tb: float = 0.0
+
+
+@dataclass
+class _Vibration:
+    """HEDH 4.6 screen. Lengths m, frequencies Hz, velocities m/s, masses kg/m."""
+
+    fluid: str
+    span: float
+    u_c: float
+    u_basis: str
+    gap_area: float
+    E: float
+    rho_metal: float
+    I: float
+    k: float
+    rho_tube: float
+    rho_shell: float
+    M_e: float
+    C_n: float
+    f_n: float
+    delta: float
+    beta: float
+    u_crit: float
+    Sr: float
+    f_vs: float
+    p_l: float
+    p_t: float
+    f_tb: float
 
 
 def _as_int(value: float) -> int:
@@ -664,8 +802,8 @@ def _sub_zone(i: VerticalShellTubeInputs, d: _Duty, ev: _Evaluation) -> None:
     ev.sub = _Sub(gamma, film_reynolds(gamma, p.mu_l), re_tr, regime, alpha, U, t_c_prime, d.Q_subcool, mtd, d.Q_subcool / (U * mtd), length)
 
 
-def _downflow_steps(i: VerticalShellTubeInputs, d: _Duty, ev: _Evaluation, shear_method: str, suction: bool) -> None:
-    """Zone 2, HSB Secs. 16.3.3, 18.3.1, Eq. 3.17: local alpha, local U, dA = dQ/(U dT), stepping along the quality."""
+def _downflow_steps(i: VerticalShellTubeInputs, d: _Duty, ev: _Evaluation, shear_method: str, suction: bool, alpha_factor: float = 1.0) -> None:
+    """Zone 2, HSB Secs. 16.3.3, 18.3.1, Eq. 3.17: local alpha, local U, dA = dQ/(U dT), stepping along the quality. alpha_factor is HEDH's non-condensable factor."""
     g, p, v = i.geometry, i.condensing, i.vapour
     n = _as_int(i.solver.n_steps)
     dx = (v.x_in - v.x_out) / n
@@ -681,14 +819,15 @@ def _downflow_steps(i: VerticalShellTubeInputs, d: _Duty, ev: _Evaluation, shear
         flux = 0.0
         if suction:
             def update(f: float) -> float:
-                alpha = vertical_downflow_local(p, ev.G, x, ev.D_i, shear_method=shear_method, condensation_flux=f).alpha
+                alpha = alpha_factor * vertical_downflow_local(p, ev.G, x, ev.D_i, shear_method=shear_method, condensation_flux=f).alpha
                 return _u_outer(i, ev.h_c, alpha, ev.D_i) * dT * (g.D_o / ev.D_i) / p.h_fg
 
             flux, _ = fixed_point(update, update(0.0), name="Suction correction", tol=1e-6, max_iter=100)
             local = vertical_downflow_local(p, ev.G, x, ev.D_i, shear_method=shear_method, condensation_flux=flux)
-        U = _u_outer(i, ev.h_c, local.alpha, ev.D_i)
+        alpha = alpha_factor * local.alpha
+        U = _u_outer(i, ev.h_c, alpha, ev.D_i)
         bracket = premoli_slip_ratio(p, ev.G, x, ev.D_i) == 1.0
-        ev.steps.append(_Step(x_a, x_b, x, dQ, t1, t2, dT, local.gamma, local.re_f, local.regime, local.alpha_gravity, local.alpha_shear, local.alpha, local.tau_used, U, dQ / (U * dT), local.film_thickness / (ev.D_i / 2.0), local.gravity_to_shear, flux, bracket))
+        ev.steps.append(_Step(x_a, x_b, x, dQ, t1, t2, dT, local.gamma, local.re_f, local.regime, local.alpha_gravity, local.alpha_shear, alpha, local.tau_used, U, dQ / (U * dT), local.film_thickness / (ev.D_i / 2.0), local.gravity_to_shear, flux, bracket))
 
 
 def _film_steps(i: VerticalShellTubeInputs, d: _Duty, ev: _Evaluation, alpha_factor: float = 1.0) -> None:
@@ -786,7 +925,15 @@ def _evaluate(i: VerticalShellTubeInputs, d: _Duty, N: int, *, shear_method: str
     suction = (i.solver.suction == "on") if suction is None else suction
     D_i = g.D_o - 2.0 * g.t_wall
     A_t = math.pi * D_i**2 / 4.0
-    d_ctl, d_otl, D_s = bundle_diameters(N, g.D_o, g.pitch, g.layout, g.L_bb)
+    alpha_factor *= noncondensable_factor(v.noncondensable_wt_pct or 0.0)
+    L_bb = g.L_bb
+    if L_bb is None:  # D_s = D_otl + L_bb(D_s). The curves are shallow (slope below 0.06), so direct substitution converges in a few passes.
+        D_otl_bare = bundle_diameters(N, g.D_o, g.pitch, g.layout, 0.0)[1]
+        L_bb = bundle_clearance(g.head_type, D_otl_bare)
+        for _ in range(20):
+            L_bb = bundle_clearance(g.head_type, D_otl_bare + L_bb)
+    d_ctl, d_otl, D_s = bundle_diameters(N, g.D_o, g.pitch, g.layout, L_bb)
+    L_tb = 0.0
     if i.variant == SHELL_SIDE:
         tube = tube_side_coolant(d.m_c, N, D_i, g.L, cool.rho, cool.cp, cool.mu, cool.k, i.coolant.mu_wall)
         shell, h_c, u_c, dp_c, L_bc = None, tube.h, tube.u, tube.dp, g.baffle_spacing
@@ -795,12 +942,13 @@ def _evaluate(i: VerticalShellTubeInputs, d: _Duty, N: int, *, shear_method: str
         G = v.m_dot / A_flow
     else:
         L_bc = _baffle_spacing(i, D_s)
-        shell = bell_delaware(d.m_c, cool.rho, cool.cp, cool.mu, cool.k, D_s, g.D_o, g.pitch, g.layout, g.baffle_cut, L_bc, g.L, N, g.L_bb, g.L_tb, g.L_sb, g.N_ss, i.coolant.mu_wall, d_ctl=d_ctl)
+        L_tb = g.L_tb if g.L_tb is not None else tube_baffle_clearance(g.D_o, 2.0 * L_bc)
+        shell = bell_delaware(d.m_c, cool.rho, cool.cp, cool.mu, cool.k, D_s, g.D_o, g.pitch, g.layout, g.baffle_cut, L_bc, g.L, N, L_bb, L_tb, g.L_sb, g.N_ss, i.coolant.mu_wall, d_ctl=d_ctl)
         tube, h_c, u_c, dp_c = None, shell.alpha_s, shell.u_s, shell.dp_s
         A_flow = N * A_t
         D_h = D_i
         G = v.m_dot / A_flow
-    ev = _Evaluation(N, D_i, A_t, G, G * v.x_in / p.rho_v, d_ctl, d_otl, D_s, L_bc, shell, tube, h_c, u_c, dp_c, D_h=D_h, A_flow=A_flow)
+    ev = _Evaluation(N, D_i, A_t, G, G * v.x_in / p.rho_v, d_ctl, d_otl, D_s, L_bc, shell, tube, h_c, u_c, dp_c, D_h=D_h, A_flow=A_flow, L_bb=L_bb, L_tb=L_tb)
     ev.t_c_top, ev.t_c_bottom = d.T_c_out, i.coolant.T_in
     ev.Q_con = d.Q_latent
 
@@ -817,7 +965,7 @@ def _evaluate(i: VerticalShellTubeInputs, d: _Duty, N: int, *, shear_method: str
             ev.t_c_bottom = ev.sub.t_c_prime
             ev.A_sub = ev.sub.A
         if i.variant == DOWNFLOW:
-            _downflow_steps(i, d, ev, shear_method, suction)
+            _downflow_steps(i, d, ev, shear_method, suction, alpha_factor)
         else:
             _film_steps(i, d, ev, alpha_factor)
         ev.A_con = sum(s.dA for s in ev.steps)
@@ -861,9 +1009,9 @@ class VerticalShellTubeModule(CondenserModule):
     input_class = VerticalShellTubeInputs
 
     def example_inputs(self) -> VerticalShellTubeInputs:
-        # ILLUSTRATIVE, not a textbook case: no source works a vertical condenser. Properties are from common.properties at the temperatures shown, so the
-        # case is reproducible. Tube and pitch: Lecture 9 table. Wall: HEDH 3.3.5 Table 7, high alloy. Clearances: HEDH Figs. 3.3.5(12), (14). Fouling values and
-        # allowables are illustrative; the 35 kPa coolant limit is the Lecture 9 thumb rule.
+        # ILLUSTRATIVE, not a textbook case: no source works a complete vertical shell-and-tube condenser. Properties are from common.properties at the temperatures shown,
+        # so the case is reproducible. Tube and pitch: Lecture 9 table. Wall: HEDH 3.3.5 Table 7, high alloy. Clearances: HEDH Figs. 3.3.5(12), (14). Fouling values,
+        # allowables and design pressures are illustrative; the 35 kPa coolant limit is the Lecture 9 thumb rule.
         t_sat = 61.85  # degC, n-pentane at 335 K, the fluid of HSB Ex. 16.2
         fluid = saturated("n_pentane", t_sat)
         vapour = saturated_vapour("n_pentane", t_sat)
@@ -878,6 +1026,7 @@ class VerticalShellTubeModule(CondenserModule):
             fouling=FoulingFactors(R_f_condensing=0.0001, R_f_coolant=0.0002),
             limits=PressureDropLimits(dp_allow_condensing=20e3, dp_allow_coolant=35e3),
             velocity=VelocityLimits(),
+            mechanical=MechanicalInputs(design_pressure_shell=500e3, design_pressure_tube=500e3, tube_metal=STAINLESS_304),
             solver=SolverOptions(),
         )
 
@@ -890,6 +1039,10 @@ class VerticalShellTubeModule(CondenserModule):
             hide |= {"vapour.T_in", "vapour.T_out", "vapour.cp_v", "vapour.k_v", "vapour.condensation_curve", "solver.suction", "vapour.x_in", "vapour.x_out"}
         else:
             hide |= {"solver.flooding_f2"}
+        if inputs.variant != SHELL_SIDE:
+            hide.add("mechanical.u_sound")
+        if inputs.geometry.head_type == HEAD_FIXED:
+            hide.add("mechanical.gasket_diameter")
         return shown - hide
 
     def validate(self, inputs: VerticalShellTubeInputs) -> list[InputIssue]:
@@ -914,8 +1067,16 @@ class VerticalShellTubeModule(CondenserModule):
             issues.append(InputIssue("coolant.T_out", "Give exactly one of: coolant outlet temperature, coolant mass flow."))
         if s.T_out is not None and s.T_out <= s.T_in:
             issues.append(InputIssue("coolant.T_out", "The coolant outlet temperature must be above its inlet temperature."))
-        if i.variant != SHELL_SIDE and g.L_tb is None:
-            issues.append(InputIssue("geometry.L_tb", "A baffled shell needs the tube-to-baffle clearance (HEDH 3.3.5 item 19)."))
+        c = v.noncondensable_wt_pct or 0.0
+        if c >= NONCONDENSABLE_LIMIT:
+            issues.append(InputIssue("vapour.noncondensable_wt_pct", f"{c:g} wt% is outside HEDH's first approximation, which is for inlet concentrations below 5 wt%. HEDH 3.4.9B: 'no simple approximation methods are available' between 5 and 80 wt%, and above 80 wt% it treats the duty as gas cooling. A stepwise condensation method is needed; enter the equilibrium curve for Silver-Bell-Ghaly instead."))
+        if c > 0.0 and v.condensation_curve:
+            issues.append(InputIssue("vapour.noncondensable_wt_pct", "Leave this at 0 with a condensation curve: the curve already holds the gas."))
+        m = i.mechanical
+        if m.design_pressure_shell and m.allowable_stress and m.joint_efficiency and m.allowable_stress * m.joint_efficiency <= 0.6 * m.design_pressure_shell:
+            issues.append(InputIssue("mechanical.design_pressure_shell", "HEDH 4.3.6 Eq. (8) needs S E above 0.6 P; this pressure is too high for the allowable stress."))
+        if m.design_pressure_tube and m.allowable_stress and m.allowable_stress <= 0.6 * m.design_pressure_tube:
+            issues.append(InputIssue("mechanical.design_pressure_tube", "HEDH 4.3.6 Eq. (8) needs S E above 0.6 P; this pressure is too high for the allowable stress."))
         if v.T_in is not None and v.T_in < p.T_sat:
             issues.append(InputIssue("vapour.T_in", "The vapour inlet temperature cannot be below the saturation temperature."))
         if v.T_out is not None and v.T_out > p.T_sat:
@@ -935,7 +1096,7 @@ class VerticalShellTubeModule(CondenserModule):
             if v.x_in != 1.0 or v.x_out != 0.0:
                 issues.append(InputIssue("vapour.x_out", "HSB Eq. 18.34 is for a reflux condenser totally condensing a pure vapour: use x_in = 1, x_out = 0."))
             if subcooled:
-                issues.append(InputIssue("vapour.T_out", "The condensate of a reflux condenser leaves against the vapour, near saturation (HEDH 3.4.3B). Subcooling is not available."))
+                issues.append(InputIssue("vapour.T_out", "The condensate of a reflux condenser leaves against the vapour, near saturation (HEDH 3.4.3B), so this variant does not subcool."))
         curve = None
         if v.condensation_curve:
             if i.variant != DOWNFLOW:
@@ -980,6 +1141,9 @@ class VerticalShellTubeModule(CondenserModule):
         extras = self._sensitivities(i, d, ev, r)
         self._outputs(i, d, ev, limited_by, extras, r)
         self._checks(i, d, ev, extras, r)
+        self._standard_sizes(i, ev, r)
+        self._pressure_boundary(i, ev, r)
+        self._vibration(i, ev, r)
         return r
 
     # ------------------------------------------------------------------------------- the iteration
@@ -1004,7 +1168,7 @@ class VerticalShellTubeModule(CondenserModule):
     def _size(self, i: VerticalShellTubeInputs, d: _Duty, r: DesignResult) -> tuple[int, str]:
         g = i.geometry
         if g.n_tubes is not None:
-            r.assumptions.append(f"Rating mode: the tube count is fixed at {_as_int(g.n_tubes)}, so there is no iteration on it. The result reports the required length against the {g.L:g} m available.")
+            r.design_basis.append(f"Rating mode: the tube count is fixed at {_as_int(g.n_tubes)}, so there is no iteration on it. The result reports the required length against the {g.L:g} m available.")
             return _as_int(g.n_tubes), "fixed by the user"
         n_max = _as_int(i.solver.n_tubes_max)
         start, why_first = self._first_guess(i, d)
@@ -1049,7 +1213,7 @@ class VerticalShellTubeModule(CondenserModule):
         r.convergence.append(info)
         if state["at_max"]:
             r.warnings.append(f"The limits are still not met at the largest tube count tried, {n_max}. Change the tube diameter, the length, the pitch or the allowable, as HEDH 3.4.9B step 9 says.")
-        r.assumptions.append(
+        r.design_basis.append(
             "Why it iterates: the tube count sets the condensing mass flux, so alpha, U, the required area and the two-phase pressure drop; and through the bundle diameter it sets the shell-side velocity, coefficient and pressure drop. So the area cannot be found before the count (HEDH 3.4.9B: 'assume the number and diameter of tubes and then calculate the required length'). "
             f"First guess: {why_first}. Update: while any limit is exceeded and no acceptable count is known, N(next) = N x worst ratio, rounded up, where the ratios are L_req/L, (dP/dP_allow)^(1/1.75) from dP ~ m^1.75 (the coolant on the shell side uses the first power, since a larger bundle changes its velocity and its row count together), and velocity/limit. These only need to point the right way, because the bisection below corrects any overshoot. "
             "Once an acceptable count exists, bisect between the largest count that failed and the smallest that passed. Stop: those two differ by one, or the update repeats. The returned count always passed; it is the smallest one if feasibility is monotonic in N, which holds for length and tube-side limits but is not proven for the shell-side pressure drop."
@@ -1059,53 +1223,57 @@ class VerticalShellTubeModule(CondenserModule):
     # ------------------------------------------------------------------------------------- notes
     @staticmethod
     def _notes(i: VerticalShellTubeInputs, r: DesignResult) -> None:
-        r.assumptions += [
+        r.design_basis += [
             f"Configuration: {VARIANT_TEXT[i.variant]}. HEDH 3.4.3A: the shell side is baffled and the coolant flows in a single pass countercurrent to the vapour; HSB Figs. 17.4, 18.6 show the same. A cocurrent coolant (HEDH says it gives better subcooling control) is not offered, because HSB's zone equations are written for countercurrent flow.",
             "One tube pass in every variant: a second pass would turn in-tube downflow into upflow and mix the phases at the turnaround, the reason HSB Sec. 18.2.1 gives against multipass horizontal tube-side condensers; HEDH 3.4.9F calls a single coolant pass the usual arrangement outside vertical tubes. The tube-count correction for several passes exists only as a chart, HEDH Fig. 3.3.5(10).",
             "Properties are constant: saturated at T_sat for the condensing side, mean temperature for the coolant. The user enters the coolant properties for that temperature; the module cannot verify this.",
             "Pressure drop does not feed back on T_sat in the iteration; a check reports the size of the effect (HEDH 3.4.9B step 7).",
-            "The tube length entered is the effective length between tubesheets, L_ti = L_ta for a fixed tubesheet (HEDH 3.3.5 Eqs. 3, 5). Tubesheet thickness is not calculated.",
+            "The tube length entered is the effective length between tubesheets, L_ti = L_ta for a fixed tubesheet (HEDH 3.3.5 Eqs. 3, 5). The tubesheet thickness is reported but not taken off it.",
+            "Clearances: an entered value wins. Blank L_bb takes HEDH Fig. 3.3.5(14) at the bundle type and blank L_tb takes Fig. 3.3.5(12) (TEMA as quoted, drilled holes), because HEDH says to use them without drawings. Blank L_sb takes Eq. (18), the curve through the TEMA values, and not Eq. (19), which adds 1.5 mm that HEDH says is often added for out-of-roundness.",
+            "Mechanical results are preliminary sizing from HEDH Part 4, which quotes ASME Section VIII and TEMA. They do not establish code compliance.",
         ]
+        if i.vapour.noncondensable_wt_pct:
+            r.design_basis.append(f"Non-condensables, {i.vapour.noncondensable_wt_pct:g} wt%: the condensing coefficient is multiplied by 1 - 0.18 C, HEDH 3.4.9B's first approximation below 5 wt%. HEDH states it for in-tube downflow; applying it to the shell-side and reflux variants is this module's extension. The duty, the coolant and the single-phase zones are not changed, and the gas is not otherwise tracked.")
         if i.variant == DOWNFLOW:
-            r.assumptions += [
+            r.design_basis += [
                 "Condensing coefficient: alpha = (alpha_sh^2 + alpha_grav^2)^(1/2), HSB Eq. 16.56, at each step. Kosky-Staub is the shear term: it is HSB's stated procedure (Sec. 16.3.2, Ex. 16.2) and carries the pressure gradient. Boyko-Kruzhilin needs no shear calculation but HSB says it has 'a much weaker fundamental basis', so it is the recorded cross-check. Chen's form, which HSB suggests as an interim measure, is the low sensitivity case.",
                 ("Suction correction (HSB Eq. 16.76) is ON by the user's choice. " if i.solver.suction == "on" else "Suction correction (HSB Eq. 16.76) is OFF, the default. HSB calls it usually necessary at larger condensation rates, and Ex. 16.6 raises alpha by 36%, but HSB also argues the correlation's underestimate of pressure gradient offsets an overestimate of film theory, and Fig. 16.9 shows predictions above data. Off gives the lower coefficient, so the larger area. ") + "The other setting is run at the final count and reported.",
-                "No entrainment and a thin film, as in HSB Ex. 16.2. Friedel in the printed form for all orientations: HSB says a slightly different correlation applies to downflow and does not give it, and uses this form in its own downflow Ex. 16.2.",
+                "No entrainment and a thin film, as in HSB Ex. 16.2. Friedel in the printed form for all orientations: HSB and HEDH 2.3.2 both say a slightly different correlation applies to downflow and neither gives it, and HSB uses this form in its own downflow Ex. 16.2. The two books print different constants, 3.24 and (1 - x)^0.24 in HSB Eqs. 10.49, 10.51 against 3.23 and (1 - x)^0.224 in HEDH 2.3.2 Eqs. 46, 48. The code uses HSB's, because its worked examples do and they are the benchmarks.",
             ]
         if _superheated(i):
-            r.assumptions.append("Desuperheating by the zones of HSB Fig. 18.6 (Bell 1986): a dry-wall zone until the wall reaches T_sat (Eq. 18.13), then the wet-wall load is added to the condensing zone at T_h = T_sat with the saturated-vapour coefficient, which HSB calls a first approximation supported by experiment (Eqs. 18.17 to 18.19). Eq. 18.10 is written by HSB for vapour outside the tube; here it is applied on the inside area, with U and alpha on the same area, which leaves the algebra unchanged. The Harwell annular-flow model (Whalley et al.) that HSB describes is 'probably far too complicated' per HSB and is not used.")
+            r.design_basis.append("Desuperheating by the zones of HSB Fig. 18.6 (Bell 1986): a dry-wall zone until the wall reaches T_sat (Eq. 18.13), then the wet-wall load is added to the condensing zone at T_h = T_sat with the saturated-vapour coefficient, which HSB calls a first approximation supported by experiment (Eqs. 18.17 to 18.19). Eq. 18.10 is written by HSB for vapour outside the tube; here it is applied on the inside area, with U and alpha on the same area, which leaves the algebra unchanged. The Harwell annular-flow model (Whalley et al.) that HSB describes is 'probably far too complicated' per HSB and is not used.")
         if _subcooled(i):
-            r.assumptions.append("Subcooling zone as a falling film: HEDH 3.4.3A says the condensate below the condensing zone 'is subcooled as a falling film', and 3.4.6G gives Eqs. 31 to 33, repeated on Lecture 24. HSB Fig. 18.6 draws a flooded tube and gives no coefficient for it; HEDH 3.4.3A does not recommend flooding (poorer subcooling, no venting, harder pressure control, steam hammer).")
+            r.design_basis.append("Subcooling zone as a falling film: HEDH 3.4.3A says the condensate below the condensing zone 'is subcooled as a falling film', and 3.4.6G gives Eqs. 31 to 33, repeated on Lecture 24. HSB Fig. 18.6 draws a flooded tube and gives no coefficient for it; HEDH 3.4.3A does not recommend flooding (poorer subcooling, no venting, harder pressure control, steam hammer).")
         if i.variant == SHELL_SIDE:
-            r.assumptions.append("Shell-side variant: HEDH 3.4.3E and 3.4.9F(a) for an unbaffled shell, low vapour velocity. The conservative approach of ignoring vapour velocity and the removal of condensate at support plates is taken, so alpha is the gravity value at the local film flow. Vapour flows down (HEDH 3.4.3E). A baffled shell would need HEDH's horizontal-bundle equations, Eqs. 3.4.6(23)-(28); those are not implemented, so it is not offered.")
+            r.design_basis.append("Shell-side variant: HEDH 3.4.3E and 3.4.9F(a) for an unbaffled shell, low vapour velocity. The conservative approach of ignoring vapour velocity and the removal of condensate at support plates is taken, so alpha is the gravity value at the local film flow. Vapour flows down (HEDH 3.4.3E). A baffled shell would need HEDH's horizontal-bundle equations, Eqs. 3.4.6(23)-(28); those are not implemented, so it is not offered.")
         if i.variant == REFLUX:
-            r.assumptions.append("Reflux variant: HSB Sec. 18.2.1 finds little interaction between vapour and film below flooding, so alpha is the falling-film value at the local film flow. HEDH 3.4.6B has a factor E of about 0.9 and says it is often neglected; it is neglected here, and the area with E = 0.9 is reported. Design limit: 75% of flooding (HEDH 3.4.3B, 3.4.9C; Lecture 24), taken on the lower of the HSB and HEDH limits because they disagree and neither is declared better.")
+            r.design_basis.append("Reflux variant: HSB Sec. 18.2.1 finds little interaction between vapour and film below flooding, so alpha is the falling-film value at the local film flow. HEDH 3.4.6B has a factor E of about 0.9 and says it is often neglected; it is neglected here, and the area with E = 0.9 is reported. Design limit: 75% of flooding (HEDH 3.4.3B, 3.4.9C; Lecture 24), taken on the lower of the HSB and HEDH limits because they disagree and neither is declared better.")
         if i.vapour.condensation_curve:
-            r.assumptions.append("Mixture: Silver-Bell-Ghaly on the user's condensation curve (HSB Eq. 18.25, Eq. 16.167). The film and transport properties entered are used over the whole path, U' is one dQ-weighted harmonic mean as sbg_area takes one value, and alpha_G is Dittus-Boelter at the local vapour flow with no Ackermann correction. The curve itself is not checked: it must come from a vapour-liquid equilibrium calculation for this mixture.")
-        r.source_gaps += [
-            "The project's supplied vertical condenser algorithm, numerical examples, data sheets, Prof. Das's textbook, TEMA and ASME are not available. Replace or confirm this module when the project drive is added.",
-            "NO WORKED VERTICAL CONDENSER EXAMPLE exists in HSB Ch. 16 to 18, HEDH 3.3, 3.4 or Lectures 9 to 12, 23, 24. The condensing path has only sub-path benchmarks, limits, closure and trends. Eq. 16.56 itself has no worked example.",
-            "Friedel for downflow: HSB names a separate form and does not give it. The printed form is used, as HSB itself does in its downflow Ex. 16.2.",
-            "Tube count: HEDH Eq. 3.3.5(16) is an estimate, within about 5% for one pass. Tube count tables (HEDH 4.2.5) and impingement cut-outs are not used. The shell diameter is not rounded to a standard size (HEDH Tables 2 to 4); round up and rate with a fixed count when a shell is chosen.",
-            "Non-condensables: HEDH 3.4.9B gives only a first approximation (coefficient x (1 - 0.18 C) for below 5% by weight) and says there is no simple method between 5 and 80%. Not implemented; the module is for vapours without non-condensables.",
+            r.design_basis.append("Mixture: Silver-Bell-Ghaly on the user's condensation curve (HSB Eq. 18.25, Eq. 16.167). The film and transport properties entered are used over the whole path, U' is one dQ-weighted harmonic mean as sbg_area takes one value, and alpha_G is Dittus-Boelter at the local vapour flow with no Ackermann correction. The curve itself is not checked: it must come from a vapour-liquid equilibrium calculation for this mixture.")
+        r.scope_limits += [
+            "No source works a complete vertical shell-and-tube condenser example: not HSB Ch. 16 to 18, HEDH 3.3, 3.4 or Lectures 9 to 12, 23, 24. The condensing path has only sub-path benchmarks, limits, closure and trends. Eq. 16.56 itself has no worked example.",
+            "Friedel for downflow: HSB and HEDH 2.3.2 name a separate form and neither gives it. The printed form is used, as HSB itself does in its downflow Ex. 16.2.",
+            "Tube count: HEDH Eq. 3.3.5(16) is an estimate, within about 5% for one pass. The design is not re-run on a standard shell: the next shell of HEDH 4.2.5 Table 2a and its count are reported, so round up and rate with a fixed count when a shell is chosen. Table 2a is coded for its five triangular layouts only.",
+            "Non-condensables: HEDH 3.4.9B gives only a first approximation below 5 wt% and says there is no simple method between 5 and 80 wt%, so the module refuses 5 wt% and above. HEDH gives no vent size or vent rate, and neither does HSB, so none is calculated.",
+            "Mechanical: HEDH does not print the fixed-tubesheet formula (0.1 D_s is used), does not define D_L in the tubesheet shear equation (only its criterion is checked) and does not reproduce the ASME chart factor for external pressure on tubes. Expansion joints, flanges, nozzles and supports are not sized.",
+            "Vibration: the HEDH 4.6.5 screen predicts vibration, not damage, and HEDH reports about 75% correct predictions on field cases. HEDH 4.6 has no worked example, so this path has only hand values. The amplitude Eq. 4.6.2(4) is not used: its g_c is listed as 9.81 m/s2 with E in N/m2, which does not close in SI.",
             "Entry and exit losses on the condensing side: HSB Sec. 18.4.3 and HEDH 3.4.7 say to use the homogeneous model with a multiplier given elsewhere. No nozzle or header size is an input, so they are not calculated.",
         ]
         if i.variant != SHELL_SIDE:
-            r.source_gaps += [
-                "Bell-Delaware: J and R factors are the curve fits HEDH gives for computer use (Eqs. 3.3.6(20), (23), (25), (26)), and j_i, f_i are its Table 1 fits. Lecture 12 presents an older chart form of the method (F_n, F_w, F_b, F_L, with alpha values 1.5, 1.35, 5, 4) that is not digitised here. Viscosity ratio at the wall is an input, not iterated with the wall temperature. Laminar window drop: HEDH suggests proration between Re 50 and 200; no proration is done.",
+            r.scope_limits += [
+                "Bell-Delaware: J and R factors are the curve fits HEDH gives for computer use (Eqs. 3.3.6(20), (23), (25), (26)), and j_i, f_i are its Table 1 fits. Lecture 12 presents an older chart form of the method (F_n, F_w, F_b, F_L, with alpha values 1.5, 1.35, 5, 4), which is not used because HEDH's equations benchmark end to end. Viscosity ratio at the wall is an input, not iterated with the wall temperature. Laminar window drop: HEDH suggests proration between Re 50 and 200; no proration is done.",
                 "Kern's method is only the cross-check on the coefficient: HSB's friction factor is Fig. 6.6 and Lecture 11's are charts, with no equation, and Lecture 11 says the method performs poorly on pressure drop. HSB limits it to a 25% cut.",
-                "Fig. 3.3.5(4) (baffle cut against spacing) is a chart and is not digitised; the check is not assessed.",
             ]
         if i.variant == DOWNFLOW:
-            r.source_gaps.append("Superheated-vapour properties are taken at saturation for density and viscosity; the vapour specific heat and conductivity are as entered. Pressure drop in the falling-film subcooling zone is not calculated: the bore is open and no source gives a value.")
+            r.scope_limits.append("Superheated-vapour properties are taken at saturation for density and viscosity; the vapour specific heat and conductivity are as entered. Pressure drop in the falling-film subcooling zone is not calculated: the bore is open and no source gives a value.")
         if i.variant == SHELL_SIDE:
-            r.source_gaps += [
+            r.scope_limits += [
                 "Shell-side pressure drop: no source gives a procedure for parallel vapour flow outside tubes. HEDH 3.4.6E says to use in-tube equations with the hydraulic equivalent diameter for heat transfer; the same substitution is used here for the pressure drop, and that extension is this module's.",
                 "Superheat is not offered in this variant: HSB Eq. 18.13 needs alpha_s, and no source gives it for parallel flow in an unbaffled shell.",
             ]
         if i.variant == REFLUX:
-            r.source_gaps += [
-                "Flooding limits disagree: HSB uses C = 0.75, Lecture 24 C = 0.8, HEDH C^2 = 0.53 (sigma/0.072)^0.5 F2. HEDH 3.4.9C step 1 names English et al., but neither HEDH nor Lecture 24 states the unit of its result, so it cannot be used as a mass flux. Belter's correlation is on Lecture 24 only and unverified (see condensation_library.md); it is not used.",
+            r.scope_limits += [
+                "Flooding limits disagree: HSB uses C = 0.75, Lecture 24 C = 0.8, HEDH C^2 = 0.53 (sigma/0.072)^0.5 F2. HEDH 3.4.9C step 1 names English et al., but neither HEDH nor Lecture 24 states the unit of its result, so it cannot be used as a mass flux. Belter's correlation is not used: only Lecture 24 prints it, and no temperature for mu_water is given.",
                 "Reflux pressure drop: no source gives a procedure below flooding. Vapour-alone friction is reported as a lower bound.",
             ]
 
@@ -1136,7 +1304,11 @@ class VerticalShellTubeModule(CondenserModule):
         r.step(f"Number of tubes, set by: {limited_by}. See the iteration table", "N", "N = smallest count meeting L_req <= L and the entered limits", "iteration table below", N, "", GEO, "HEDH 3.4.9B; HSB Sec. 18.3.3")
         r.step("Diameter through the centres of the outer tubes, inverting the tube count estimate. One tube pass, so no pass correction", "D_ctl", "N = 0.78 D_ctl^2 / (C1 L_tp^2), so D_ctl = L_tp (N C1 / 0.78)^(1/2)", f"{_n(g.pitch)} ({N} {_n(c1)} / 0.78)^0.5", ev.d_ctl, "m", GEO, "HEDH 3.3.5 Eq. (16)")
         r.step("Bundle diameter", "D_otl", "D_otl = D_ctl + D_o", f"{_n(ev.d_ctl)} + {_n(g.D_o)}", ev.d_otl, "m", GEO, "HEDH 3.3.5 Eq. (21)")
-        r.step("Shell inside diameter", "D_s", "D_s = D_otl + L_bb", f"{_n(ev.d_otl)} + {_n(g.L_bb)}", ev.D_s, "m", GEO, "HEDH 3.3.5 Eq. (20a)")
+        if g.L_bb is None:
+            r.step(f"Bundle clearance left blank, so from the chart at D_s for: {g.head_type}. D_s and L_bb are found together, by substitution", "L_bb", "L_bb = HEDH Fig. 3.3.5(14) at D_s", f"D_s = {_n(ev.D_s)} m", ev.L_bb, "m", GEO, "HEDH 3.3.5 Fig. 14, digitised +-0.5 mm")
+            if not shell_on_fig_14(g.head_type, ev.D_s):
+                r.warnings.append(f"D_s = {ev.D_s * 1e3:.0f} mm is outside the curve of HEDH Fig. 3.3.5(14) for {g.head_type}, so L_bb is held at the end of the curve. Enter L_bb from a drawing.")
+        r.step("Shell inside diameter", "D_s", "D_s = D_otl + L_bb", f"{_n(ev.d_otl)} + {_n(ev.L_bb)}", ev.D_s, "m", GEO, "HEDH 3.3.5 Eq. (20a)")
         r.step("Available area, outside of the tubes", "A", "A = pi D_o L N", f"pi ({_n(g.D_o)}) ({_n(g.L)}) ({N})", ev.A_avail, "m2", GEO, "HEDH 3.3.5 Eq. (30)")
         r.step("Wall resistance, referred to the outside", "R_w", "R_w = D_o ln(D_o/D_i) / (2 k)", f"{_n(g.D_o)} ln({_n(g.D_o)}/{_n(ev.D_i)}) / (2 {_n(g.k_wall)})", wall_resistance_cylinder(g.D_o, ev.D_i, g.k_wall), "m2.K/W", THE, "HSB Eq. 18.11")
         if i.variant != SHELL_SIDE:
@@ -1155,7 +1327,11 @@ class VerticalShellTubeModule(CondenserModule):
         src = "HEDH 3.3.5"
         src6 = "HEDH 3.3.6"
         r.step("Coolant side: Bell-Delaware, not Kern. HEDH gives it in equations and HSB and Lecture 12 call it the widely accepted, more accurate method; Kern is restricted to a 25% cut and has no equation for f. Kern's coefficient is the cross-check below", "L_bc", "L_bc = absolute spacing, or max(ratio D_s, 50.8 mm), limited to L_b,max / 2", f"ratio {_n(g.baffle_spacing_ratio)}, D_s = {_n(ev.D_s)} m", s.L_bc, "m", GEO, "Lecture 9; HEDH 3.3.5 item 12")
-        r.step("Cross-flow area at the shell centreline", "S_m", "S_m = L_bc [L_bb + (D_ctl / L_tp,eff)(L_tp - D_o)]", f"{_n(s.L_bc)} [{_n(g.L_bb)} + ({_n(s.d_ctl)} / {_n(L_eff)})({_n(g.pitch)} - {_n(g.D_o)})]", s.S_m, "m2", GEO, src + " Eq. (22)")
+        r.step("Cross-flow area at the shell centreline", "S_m", "S_m = L_bc [L_bb + (D_ctl / L_tp,eff)(L_tp - D_o)]", f"{_n(s.L_bc)} [{_n(ev.L_bb)} + ({_n(s.d_ctl)} / {_n(L_eff)})({_n(g.pitch)} - {_n(g.D_o)})]", s.S_m, "m2", GEO, src + " Eq. (22)")
+        if g.L_tb is None:
+            r.step(f"Tube-to-baffle clearance left blank: TEMA as quoted, longest unsupported span 2 L_bc = {_n(2.0 * s.L_bc)} m", "L_tb", "L_tb = 0.8 mm if 2 L_bc <= 0.9 m or D_o > 31.75 mm, otherwise 0.4 mm", f"2 L_bc = {_n(2.0 * s.L_bc)} m, D_o = {_n(g.D_o)} m", ev.L_tb, "m", GEO, "HEDH 3.3.5 Fig. 12; HEDH 4.2.5-7")
+        if g.L_sb is None:
+            r.step("Shell-to-baffle clearance left blank: the TEMA curve plus 1.5 mm for out-of-roundness, as HEDH captions Fig. 13", "L_sb", "L_sb = 3.1 mm + 0.004 D_s", f"3.1e-3 + 0.004 ({_n(ev.D_s)})", s.L_sb, "m", GEO, "HEDH 3.3.5 Eq. (19)")
         r.step("Shell-side mass velocity", "m_s", "m_s = M_c / S_m", f"{_n(d.m_c)} / {_n(s.S_m)}", s.m_s, "kg/m2.s", HYD, src + " Eq. (24)")
         r.step("Shell-side Reynolds number", "Re_s", "Re_s = D_o m_s / mu", f"{_n(g.D_o)} ({_n(s.m_s)}) / {_n(cool.mu)}", s.Re, "", HYD, src + " Eq. (25)")
         r.step("Shell-side Prandtl number", "Pr_s", "Pr_s = c_p mu / k", f"{_n(cool.cp)} ({_n(cool.mu)}) / {_n(cool.k)}", s.Pr, "", THE, src + " Eq. (26)")
@@ -1172,7 +1348,7 @@ class VerticalShellTubeModule(CondenserModule):
         r.step("Bypass area per baffle space. No tube-pass lane", "S_b", "S_b = L_bc (D_s - D_otl)", f"{_n(s.L_bc)} ({_n(ev.D_s)} - {_n(s.d_otl)})", s.S_b, "m2", GEO, src6 + " Eq. (15)")
         r.step("Bypass fraction", "F_sbp", "F_sbp = S_b/S_m", f"{_n(s.S_b)}/{_n(s.S_m)}", s.F_sbp, "", GEO, src6 + " Eq. (16)")
         r.step("Shell-to-baffle leakage area", "S_sb", "S_sb = pi D_s (L_sb/2)(360 - theta_ds)/360", f"pi ({_n(ev.D_s)}) ({_n(s.L_sb)}/2) (360 - {_n(s.theta_ds)})/360", s.S_sb, "m2", GEO, src6 + " Eq. (17)")
-        r.step("Tube-to-baffle leakage area", "S_tb", "S_tb = (pi/4)[(D_o + L_tb)^2 - D_o^2] N (1 - F_w)", f"(pi/4)[({_n(g.D_o)} + {_n(g.L_tb)})^2 - {_n(g.D_o)}^2] ({ev.N}) (1 - {_n(s.F_w)})", s.S_tb, "m2", GEO, src6 + " Eq. (18)")
+        r.step("Tube-to-baffle leakage area", "S_tb", "S_tb = (pi/4)[(D_o + L_tb)^2 - D_o^2] N (1 - F_w)", f"(pi/4)[({_n(g.D_o)} + {_n(ev.L_tb)})^2 - {_n(g.D_o)}^2] ({ev.N}) (1 - {_n(s.F_w)})", s.S_tb, "m2", GEO, src6 + " Eq. (18)")
         r.step("Leakage parameters", "r_lm", "r_lm = (S_sb + S_tb)/S_m; r_s = S_sb/(S_sb + S_tb)", f"({_n(s.S_sb)} + {_n(s.S_tb)})/{_n(s.S_m)}; r_s = {_n(s.r_s)}", s.r_lm, "", GEO, src6 + " Eqs. (21), (22)")
         r.step("Ideal tube bank j factor, Table 1 row for this Re and layout", "j_i", "j_i = a1 (1.33/(L_tp/D_o))^a Re^a2, a = a3/(1 + 0.14 Re^a4)", f"Re = {_n(s.Re)}, L_tp/D_o = {_n(g.pitch / g.D_o)}, {g.layout}", s.j_i, "", THE, "HEDH 3.3.7 Eq. (1), Table 1")
         r.step("Viscosity correction, liquid. Ratio 1 if no wall viscosity is entered", "phi^r", "phi^r = (mu/mu_w)^0.14", f"({_n(cool.mu)}/{_n(i.coolant.mu_wall or cool.mu)})^0.14", s.phi_r, "", THE, "HEDH 3.3.7 Eq. (5)")
@@ -1215,6 +1391,10 @@ class VerticalShellTubeModule(CondenserModule):
     def _zone_steps(i: VerticalShellTubeInputs, d: _Duty, ev: _Evaluation, r: DesignResult) -> None:
         g, p, v = i.geometry, i.condensing, i.vapour
         q_src = "HSB Eq. 3.17; Secs. 18.2.1, 18.3.1"
+        c_nc = v.noncondensable_wt_pct or 0.0
+        f_nc = noncondensable_factor(c_nc)
+        if c_nc:
+            r.step("Non-condensable factor on the condensing coefficient, HEDH's first approximation below 5 wt%", "F_nc", "F_nc = 1 - 0.18 C", f"1 - 0.18 ({_n(c_nc)})", f_nc, "", THE, "HEDH 3.4.9B(a)")
         if ev.dry is not None:
             z = ev.dry
             r.step("Zone 1: vapour Reynolds number", "Re_v", "Re_v = G D_i / mu_v", f"{_n(ev.G)} ({_n(ev.D_i)}) / {_n(p.mu_v)}", z.re, "", THE, "HSB Sec. 18.3.2")
@@ -1258,13 +1438,13 @@ class VerticalShellTubeModule(CondenserModule):
                         r.step(f"Interfacial shear, {tag}", "tau", "tau = (-dp_F/dz) D_i / 4", f"{_n(fr.dpdz)} ({_n(ev.D_i)}) / 4", s.tau, "N/m2", THE, "HSB Eq. 16.53")
                     r.step(f"Dimensionless film thickness and temperature, {tag}", "T+", _delta_formula(s.re_f, d_plus), f"delta+ = {_n(d_plus)}, Pr_L = {_n(pr)}", t_plus, "", THE, "HSB Eqs. 16.46 to 16.51")
                     r.step(f"Shear term, Kosky-Staub, {tag}", "alpha_sh", "alpha_sh = c_pL (rho_L tau)^(1/2) / T+", f"{_n(p.cp_l)} ({_n(p.rho_l)} {_n(s.tau)})^0.5 / {_n(t_plus)}", s.alpha_shear, "W/m2.K", THE, "HSB Eq. 16.52")
-                    r.step(f"Combined coefficient, {tag}", "alpha", "alpha = (alpha_sh^2 + alpha_grav^2)^(1/2)", f"({_n(s.alpha_shear)}^2 + {_n(s.alpha_gravity)}^2)^0.5", s.alpha, "W/m2.K", THE, "HSB Eq. 16.56")
+                    r.step(f"Combined coefficient, {tag}", "alpha", "alpha = F_nc (alpha_sh^2 + alpha_grav^2)^(1/2)" if c_nc else "alpha = (alpha_sh^2 + alpha_grav^2)^(1/2)", (f"{_n(f_nc)} " if c_nc else "") + f"({_n(s.alpha_shear)}^2 + {_n(s.alpha_gravity)}^2)^0.5", s.alpha, "W/m2.K", THE, "HSB Eq. 16.56" + ("; HEDH 3.4.9B(a)" if c_nc else ""))
                 else:
                     per = "pi D_i" if i.variant == REFLUX else "pi D_o"
                     flow = "x" if i.variant == REFLUX else "(1 - x)"
                     r.step(f"Film flow per unit periphery, {tag}", "Gamma", f"Gamma = M_v {flow} / (N {per})", f"{_n(v.m_dot)} ({_n(s.x if i.variant == REFLUX else 1 - s.x)}) / ({ev.N} {per}), D = {_n(ev.D_i if i.variant == REFLUX else g.D_o)}", s.gamma, "kg/m.s", THE, "HSB Eq. 16.19; HEDH 3.4.9")
                     r.step(f"Film Reynolds number, {tag}", "Re_f", "Re_f = 4 Gamma / eta_L", f"4 ({_n(s.gamma)}) / {_n(p.mu_l)}", s.re_f, "", THE, "HSB Eq. 16.19")
-                    r.step(f"Gravity-controlled film coefficient, {tag}: {s.regime}", "alpha", GRAVITY_FORMULA[s.regime], f"lambda_L = {_n(p.k_l)}, [eta^2/(rho_L (rho_L - rho_G) g)]^(1/3) = {_n(gravity_length(p))}, Re_f = {_n(s.re_f)}", s.alpha, "W/m2.K", THE, "HSB Sec. 16.3.1, 18.2.1; HEDH 3.4.6 Eqs. 17-19")
+                    r.step(f"Gravity-controlled film coefficient, {tag}: {s.regime}" + (f", times F_nc = {_n(f_nc)}" if c_nc else ""), "alpha", GRAVITY_FORMULA[s.regime], f"lambda_L = {_n(p.k_l)}, [eta^2/(rho_L (rho_L - rho_G) g)]^(1/3) = {_n(gravity_length(p))}, Re_f = {_n(s.re_f)}", s.alpha, "W/m2.K", THE, "HSB Sec. 16.3.1, 18.2.1; HEDH 3.4.6 Eqs. 17-19")
                 r.step(f"Overall coefficient, {tag}, outside area", "U", "1/U = 1/h_o + R_f,o + R_w + (D_o/D_i) R_f,i + (D_o/D_i)/h_i", f"h_c = {_n(ev.h_c)}, alpha = {_n(s.alpha)}, R_f,cond = {_n(i.fouling.R_f_condensing)}, R_f,cool = {_n(i.fouling.R_f_coolant)}, D_o/D_i = {_n(g.D_o / ev.D_i)}", s.U, "W/m2.K", THE, "HSB Eq. 18.21")
                 r.step(f"Local temperature difference, {tag}", "dT", "dT = log mean of (T_sat - T_c) at the step ends", f"{_n(p.T_sat)} - {_n(s.t1)}, {_n(p.T_sat)} - {_n(s.t2)}", s.dT, "K", THE, q_src)
                 r.step(f"Step area, {tag}", "dA", "dA = dQ / (U dT)", f"{_n(s.dQ)} / ({_n(s.U)} {_n(s.dT)})", s.dA, "m2", THE, q_src)
@@ -1345,6 +1525,7 @@ class VerticalShellTubeModule(CondenserModule):
         r.output("tube_passes", "Tube passes", 1, "", GEO, "HEDH 3.4.3A")
         r.output("sized_by", "Tube count set by", limited_by, "", GEO, "")
         r.output("D_s", "Shell inside diameter (not rounded to a standard size)", ev.D_s, "m", GEO, "HEDH 3.3.5 Eqs. (16), (20), (21)")
+        r.output("L_bb", "Bundle-to-shell clearance used", ev.L_bb, "m", GEO, "entered" if g.L_bb is not None else "HEDH Fig. 3.3.5(14)")
         r.output("D_otl", "Bundle diameter", ev.d_otl, "m", GEO, "HEDH 3.3.5 Eq. (21)")
         r.output("D_i", "Tube bore", ev.D_i, "m", GEO, "HEDH 3.3.5")
         r.output("L_available", "Tube length available", g.L, "m", GEO, "")
@@ -1372,6 +1553,8 @@ class VerticalShellTubeModule(CondenserModule):
         r.output("dp_condensing_gravity", "Gravity term (negative in downflow: gain)", ev.dp_g, "Pa", HYD, "HSB Eq. 10.26")
         r.output("dp_condensing_net", "Net pressure change in the tubes", ev.dp_total, "Pa", HYD, "HSB Eq. 10.27")
         if s:
+            r.output("L_tb", "Tube-to-baffle clearance used", ev.L_tb, "m", GEO, "entered" if g.L_tb is not None else "HEDH Fig. 3.3.5(12)")
+            r.output("L_sb", "Shell-to-baffle clearance used", s.L_sb, "m", GEO, "entered" if g.L_sb is not None else "HEDH 3.3.5 Eq. (19)")
             r.output("L_bc", "Baffle spacing", s.L_bc, "m", GEO, "Lecture 9; HEDH 3.3.5")
             r.output("N_b", "Number of baffles", s.N_b, "", GEO, "HEDH 3.3.6 Eq. (14)")
             r.output("J_total", "Product of shell-side correction factors", s.J_tot, "", THE, "HEDH 3.3.8")
@@ -1423,7 +1606,12 @@ class VerticalShellTubeModule(CondenserModule):
         # Shell-side method validity
         if s is not None:
             r.check("Baffle cut in the range of the J_c fit", 15.0 <= g.baffle_cut <= 45.0, f"B_c = {g.baffle_cut:g}%; 15 to 45%", THE, "HEDH 3.3.6I")
-            r.check("Baffle cut against spacing, HEDH Fig. 3.3.5(4)", None, f"B_c = {g.baffle_cut:g}%, L_bc/D_s = {s.L_bc / ev.D_s:.2f}. The recommended region is a chart and is not digitised; read the SBC line by hand.", GEO, "HEDH 3.3.5 Fig. 4")
+            ratio = s.L_bc / ev.D_s
+            band = baffle_cut_region("SBC", ratio)
+            if band is None:
+                r.check("Baffle cut against spacing, HEDH Fig. 3.3.5(4), SBC band", False, f"L_bc/D_s = {ratio:.2f} is outside the 0.20 to 1.00 that the SBC band covers.", GEO, "HEDH 3.3.5 Fig. 4")
+            else:
+                r.check("Baffle cut against spacing, HEDH Fig. 3.3.5(4), SBC band", band[0] - FIG_4_READ <= g.baffle_cut <= band[1] + FIG_4_READ, f"B_c = {g.baffle_cut:g}% at L_bc/D_s = {ratio:.2f}; band {band[0]:.1f} to {band[1]:.1f}%, centre line {interpolate(FIG_4_SBC_CENTRE, ratio):.1f}%. Chart read +-{FIG_4_READ:g}% B_c, allowed for. SBC is the no-phase-change band, the coolant here.", GEO, "HEDH 3.3.5 Fig. 4, digitised")
             r.check("Baffle leakage correction not too low", s.J_l >= J_L_MIN, f"J_l = {s.J_l:.3f} >= {J_L_MIN}; preferably 0.7 to 0.9", THE, "HEDH 3.3.6J")
             r.check("Product of correction factors", s.J_tot >= TOTAL_J_MIN, f"J_c J_l J_b J_r = {s.J_tot:.3f} >= {TOTAL_J_MIN}; preferably >= 0.5", THE, "HEDH 3.3.8A")
             r.check("Coolant in turbulent shell-side flow", s.Re >= 100.0, f"Re_s = {s.Re:.0f}. Below 100 HSB doubts the method's validity and HEDH applies J_r.", THE, "HSB Sec. 6.3.2; HEDH 3.3.6L")
@@ -1433,6 +1621,8 @@ class VerticalShellTubeModule(CondenserModule):
             r.check("Baffle spacing at most D_s", s.L_bc <= ev.D_s, f"L_bc = {s.L_bc * 1e3:.1f} mm <= {ev.D_s * 1e3:.1f} mm", GEO, "HEDH 3.3.5 item 12")
             kern = kern_shell_side(d.m_c, cool.rho, cool.cp, cool.mu, cool.k, ev.D_s, g.D_o, g.pitch, g.layout, s.L_bc, i.coolant.mu_wall)
             r.check("Kern cross-check on the coolant coefficient", None, f"h_Kern = {kern.alpha:.0f} against Bell-Delaware {s.alpha_s:.0f} W/m2.K, ratio {kern.alpha / s.alpha_s:.2f}. HSB's Ex. 6.1 and 6.2 give 978 and 769 on one exchanger, so such a gap is expected.", THE, "HSB Exs. 6.1, 6.2")
+        else:
+            r.check("Baffle cut against spacing, HEDH Fig. 3.3.5(4)", None, "This variant has an unbaffled shell, so there is no segmental cut to judge. The CV region of the chart is for baffled shell-side condensation, which is not offered; baffle_cut_region holds it.", GEO, "HEDH 3.3.5 Fig. 4; HEDH 3.4.9F")
 
         # Geometry
         ratio = g.pitch / g.D_o
@@ -1449,15 +1639,21 @@ class VerticalShellTubeModule(CondenserModule):
         r.check("Length to shell diameter ratio", 5.0 <= g.L / ev.D_s <= 10.0, f"L/D_s = {g.L / ev.D_s:.1f}; HSB: 5 to 10 for best all-round performance", GEO, "HSB Sec. 6.2.4")
         r.check("Shell to tube diameter ratio", ev.D_s / g.D_o >= 15.0, f"D_s/D_o = {ev.D_s / g.D_o:.1f} >= 15; the shell-side and count methods lose accuracy below this", GEO, "HEDH 3.3.5 item 2")
         r.check("Tubes per pass", ev.N >= MIN_TUBES, f"N = {ev.N} >= {MIN_TUBES}", GEO, "HEDH 3.3.5 item 16")
-        r.check("Tube wall thickness against the Lecture 9 table", None, f"t = {g.t_wall * 1e3:.2f} mm. Lecture 9: OD 15.88: 1.65 or 1.24; 19.05: 2.11 or 1.65; 25.4: 2.77 or 2.11; 31.75: 3.40 or 2.77 mm (carbon steel, or stainless and copper alloy). The slide prints 24.40 and 25.04 for the 25.4 mm tube. The thickness for pressure is set by the pressure code, not available.", GEO, "Lecture 9")
+        typical = typical_tube_wall(g.D_o, TUBE_METALS[i.mechanical.tube_metal][2])
+        wall_text = f"t = {g.t_wall * 1e3:.2f} mm, {i.mechanical.tube_metal}. Lecture 9 and HEDH 4.2.5-1, carbon and low alloy or stainless and copper alloys: OD 15.88: 1.65 or 1.24; 19.05: 2.11 or 1.65; 25.40: 2.77 or 2.11; 31.75: 3.40 or 2.77 mm. Lecture 9 misprints the third OD as 24.40 and 25.04; HEDH settles it as 25.40 mm (1 in). HEDH calls these typical; the pressure check is separate."
+        if typical is None:
+            r.check("Tube wall thickness against the Lecture 9 table", None, wall_text + f" D_o = {g.D_o * 1e3:.2f} mm is not in the table.", GEO, "Lecture 9; HEDH 4.2.5-1")
+        else:
+            r.check("Tube wall thickness against the Lecture 9 table", g.t_wall >= typical * (1 - 1e-6), wall_text + f" At least {typical * 1e3:.2f} mm here.", GEO, "Lecture 9; HEDH 4.2.5-1")
         span = max_unsupported_span(g.D_o, g.material_group)
+        span_note = "HEDH's Eqs. (10) run up to 2.3% below the TEMA table quoted in HEDH 4.2.5-7 (1308, 1523, 1853, 2183 mm against 1321, 1524, 1880, 2235 mm), so they err on the safe side."
         if span is None:
-            r.check("Maximum unsupported span (TEMA, via HEDH)", None, f"D_o = {g.D_o * 1e3:.1f} mm is outside the range of HEDH Eqs. (10).", MEC, "HEDH 3.3.5")
+            r.check("Maximum unsupported span (TEMA, as quoted in HEDH Part 4)", None, f"D_o = {g.D_o * 1e3:.1f} mm is outside the range of HEDH Eqs. (10).", MEC, "HEDH 3.3.5")
         elif s is not None:
             used = 2.0 * s.L_bc
-            r.check("Unsupported span in the window, 2 L_bc, within the TEMA maximum (via HEDH, TEMA itself not available)", used <= span * (1 + 1e-9), f"2 L_bc = {used * 1e3:.0f} mm <= L_b,max = {span * 1e3:.0f} mm. HSB Table 6.1 and Lecture 9 (762 mm spacing for 19.05 mm steel) agree. HSB: most vibration failures are above 80% of this, here {100 * used / span:.0f}%.", MEC, "HEDH 3.3.5 Eqs. (10); HSB Table 6.1; Lecture 9")
+            r.check("Unsupported span in the window, 2 L_bc, within the TEMA maximum (as quoted in HEDH Part 4)", used <= span * (1 + 1e-9), f"2 L_bc = {used * 1e3:.0f} mm <= L_b,max = {span * 1e3:.0f} mm. {span_note} HEDH 4.6.2 and HSB: the current trend is to limit spans to 80% of the TEMA value, here {100 * used / span:.0f}%.", MEC, "HEDH 3.3.5 Eqs. (10); HEDH 4.2.5-7; HSB Table 6.1; Lecture 9")
         else:
-            r.check("Support plate spacing within the TEMA maximum (via HEDH, TEMA itself not available)", (g.baffle_spacing <= span) if g.baffle_spacing else None, (f"Spacing {g.baffle_spacing * 1e3:.0f} mm" if g.baffle_spacing else "No support plate spacing entered") + f"; L_b,max = {span * 1e3:.0f} mm.", MEC, "HEDH 3.3.5 Eqs. (10); HSB Table 6.1")
+            r.check("Support plate spacing within the TEMA maximum (as quoted in HEDH Part 4)", (g.baffle_spacing <= span) if g.baffle_spacing else None, (f"Spacing {g.baffle_spacing * 1e3:.0f} mm" if g.baffle_spacing else "No support plate spacing entered") + f"; L_b,max = {span * 1e3:.0f} mm. {span_note}", MEC, "HEDH 3.3.5 Eqs. (10); HEDH 4.2.5-7; HSB Table 6.1")
 
         # Hydraulic limits
         if i.limits.dp_allow_condensing is None:
@@ -1491,16 +1687,157 @@ class VerticalShellTubeModule(CondenserModule):
         dT_sat = t_abs * (1.0 / p.rho_v - 1.0 / p.rho_l) * max(ev.dp_limit, 0.0) / p.h_fg
         r.check("Pressure-drop feedback on the condensing temperature", None, f"dP/P = {100 * ev.dp_limit / v.pressure:.2f}%. dT_sat ~ T (1/rho_v - 1/rho_L) dP / h_fg = {dT_sat:.2f} K (Clapeyron, a thermodynamic identity, not from the sources). HEDH 3.4.9B step 7: correct T_sat 'if the pressure drop is large enough', with no value. Not iterated. Smallest dT in the zone: {dt_min:.1f} K.", THE, "HEDH 3.4.9B; Lecture 24")
 
-        # Things that could not be assessed
+        # Design guidance, no numeric verdict
         rho_noz = cool.rho
         d_noz = math.sqrt(d.m_c / (math.pi / 4.0 * rho_noz * math.sqrt(2250.0 / rho_noz)))
-        r.check("Coolant nozzle size", None, f"Minimum inside diameter {d_noz * 1e3:.0f} mm at rho v^2 = 2250 kg/m.s2 with no impingement plate (HEDH Eqs. 3.3.5(11a), (15), quoting TEMA). Nozzle pressure drop and selection are not assessed; HEDH says vibration may require larger. TEMA is not available.", MEC, "HEDH 3.3.5 item 14")
-        r.check("Tube vibration", None, "Not assessed. HSB Sec. 18.3.3 lists shell-side velocity limits for vibration without values; HSB Sec. 6.2.6 ties failures to spans above 80% of the TEMA maximum (HEDH Sec. 4.6 and TEMA would govern; not available here).", MEC, "Not available")
-        r.check("Pressure boundary, tubes, tubesheets, shell, expansion joint", None, "Not assessed. Governed by ASME BPVC Section VIII and TEMA mechanical standards, neither available. HEDH 3.3.5 Eq. (1), L_ts = 0.1 D_s, is a rough estimate only. No code compliance is claimed.", MEC, "ASME VIII; TEMA, not available")
-        r.check("Venting of non-condensables", None, ("In-tube flow has a fixed path, so venting is simple, but HEDH 3.4.3A wants tubesheet vents for the shell-side coolant and a head that minimises re-entrainment." if i.variant == DOWNFLOW else "HEDH 3.4.5B: the venting problem is most severe in shell-side condensers; Khan's minimum velocity is 1.5 m/s leaving the last row, for cross flow." if i.variant == SHELL_SIDE else "HSB Sec. 17.3.1: venting is convenient, but a purge from the upper head is needed (HSB Fig. 17.2). HEDH 3.4.3B: not suited to large amounts of non-condensables.") + " No vent size is calculated; the sources have no general rule.", THE, "HEDH 3.4.3, 3.4.5B; HSB Sec. 17.3.1")
-        r.check("Fogging", None, "Relevant only with non-condensables or mixtures (HEDH 3.4.5C). Not calculated.", THE, "HEDH 3.4.5C")
+        r.check("Coolant nozzle size", None, f"Minimum inside diameter {d_noz * 1e3:.0f} mm at rho v^2 = 2250 kg/m.s2 with no impingement plate (HEDH Eqs. 3.3.5(11a), (15), TEMA as quoted; HEDH 4.2.5-7 prints 2230). Nozzle pressure drop and selection are not assessed; HEDH says vibration may require larger.", MEC, "HEDH 3.3.5 item 14")
+        c_nc = v.noncondensable_wt_pct or 0.0
+        if c_nc:
+            r.check("Non-condensables below 5 wt%, the limit of HEDH's approximation", c_nc < NONCONDENSABLE_LIMIT, f"C = {c_nc:g} wt%, coefficient x {noncondensable_factor(c_nc):.3f}. HEDH: the actual reduction is a complicated function of vapour properties, flow rates and heat fluxes, which only stepwise design captures.", THE, "HEDH 3.4.9B(a)")
+        vent_where = ("In-tube flow has a fixed path, so venting is simple and positive (HEDH 3.4.3A, 3.4.5B). Drill vents in the upper tubesheet for the shell-side coolant, discharging continuously to an open drain, and fit a funnel or baffle in the lower head to limit re-entrainment into the vent gas (HEDH 3.4.3A)." if i.variant == DOWNFLOW
+                      else "HEDH 3.4.5B: gases can collect in pockets on the shell side and need vapour velocity to reach the outlet. Khan's minimum is 1.5 m/s leaving the last tube row, from steam in cross flow at 54 and 102 degC, so a reference only for parallel flow here. Lecture 23: the vent is usually in the lower half of the shell. HSB Sec. 17.3.1: venting the shell side is a known difficulty of this type." if i.variant == SHELL_SIDE
+                      else "Purge from the upper head (HSB Sec. 18.5, Fig. 17.2), which HSB calls convenient for venting. HEDH 3.4.3B and Lecture 24: reflux is not suited to mixtures with large amounts of non-condensables.")
+        r.check("Venting of non-condensables", None, vent_where + " HSB Sec. 17.1: arrange purging for start-up. No vent size is calculated: HEDH 3.4.5B calls the literature sparse with very few rules, and no source gives a vent rate.", THE, "HEDH 3.4.3, 3.4.5B; HSB Secs. 17.1, 17.3.1, 18.5; Lecture 23")
+        r.check("Fogging", None, "Relevant only with non-condensables or mixtures (HEDH 3.4.5C, 2.6.7). No source gives a design number, so it is not calculated. HEDH's measures: keep the temperature difference small, and fit demisters if fog is likely.", THE, "HEDH 3.4.5C, 2.6.7F")
         if d.curve:
             r.check("Condensation curve", None, "Taken as entered. It is not verified here. Differential versus integral condensation (Lecture 24) depends on the flow path: in-tube downflow keeps the condensate with the vapour, so integral condensation is the natural assumption.", THE, "Lecture 24; HSB Sec. 18.3.3")
+
+    # ------------------------------------------------------------------------------- standard sizes
+    @staticmethod
+    def _standard_sizes(i: VerticalShellTubeInputs, ev: _Evaluation, r: DesignResult) -> None:
+        g = i.geometry
+        fixed = g.head_type == HEAD_FIXED
+        if i.variant != REFLUX:
+            low, high = TUBE_LENGTH_RANGE["fixed" if fixed else "removable"]
+            r.check("Tube length within the common range of HEDH 4.2.5", low <= g.L <= high, f"L = {g.L:g} m; HEDH 4.2.5-2: most commonly {low:g} to {high:g} m for this bundle type, and up to 22 m has been made. Neither book lists standard lengths.", GEO, "HEDH 4.2.5-2")
+        shell = next_standard_shell(ev.D_s)
+        if shell is None:
+            r.check("Standard shell", False, f"D_s = {ev.D_s * 1e3:.0f} mm is above the largest shell of HEDH 4.2.5 Table 2a, {STANDARD_SHELLS_MM[-1]} mm.", GEO, "HEDH 4.2.5 Table 2a")
+            return
+        r.output("D_s_standard", "Next standard shell ID. The design is not re-run on it", shell, "m", GEO, "HEDH 4.2.5 Table 2a")
+        counts = table_2a_counts(g.D_o, g.pitch, shell) if g.layout == LAYOUT_30 and fixed else None
+        if counts is None:
+            why = "Table 2a covers fixed tubesheets with one of 15.88 x 19.84, 19.05 x 23.81, 19.05 x 25.4, 25.4 x 31.75, 31.75 x 39.69 mm on a triangular pitch" + ("." if fixed else f"; this is a {g.head_type}, for which HEDH has Table 2c, not coded.") + " Tables 2b and 2c, with the square pitches, are not coded."
+            r.check("Standard shell holds the tubes, HEDH 4.2.5 Table 2a", None, f"Next shell {shell * 1e3:.0f} mm against D_s = {ev.D_s * 1e3:.0f} mm. No count for this layout. {why}", GEO, "HEDH 4.2.5 Table 2a")
+            return
+        full, reduced = counts
+        r.output("n_tubes_table_full", "Table 2a full count at the standard shell, one pass", full, "", GEO, "HEDH 4.2.5 Table 2a")
+        r.output("n_tubes_table_reduced", "Table 2a reduced count at the standard shell, one pass", reduced, "", GEO, "HEDH 4.2.5 Table 2a")
+        holds = reduced >= ev.N
+        larger = smallest_table_2a_shell(g.D_o, g.pitch, ev.N)
+        r.check("Standard shell holds the tubes, HEDH 4.2.5 Table 2a", holds, f"{shell * 1e3:.0f} mm shell: reduced count {reduced}, full count {full}, against N = {ev.N}. The reduced count allows for nozzles of D_s/3 on the shell and is the one judged, since this shell has nozzles." + ("" if holds else (f" The smallest shell whose reduced count holds N is {larger * 1e3:.0f} mm." if larger else " No shell in the table holds N.")) + " HEDH's Eq. 3.3.5(16), used in the sizing, is within about 5%.", GEO, "HEDH 4.2.5 Table 2a, Sec. H")
+
+    # ---------------------------------------------------------------------------- pressure boundary
+    @staticmethod
+    def _pressure_boundary(i: VerticalShellTubeInputs, ev: _Evaluation, r: DesignResult) -> None:
+        g, m = i.geometry, i.mechanical
+        statement = "Preliminary sizing from HEDH Part 4, which quotes ASME Section VIII and TEMA. It does not establish code compliance."
+        if not m.design_pressure_shell or not m.design_pressure_tube:
+            r.check("Pressure boundary: shell, tube and tubesheet", None, f"Enter both design pressures to size them. {statement}", MEC, "HEDH 4.3.6")
+            return
+        S, E, c = m.allowable_stress, m.joint_efficiency, m.corrosion_allowance
+        P_s, P_t = m.design_pressure_shell, m.design_pressure_tube
+        material = f"S = {S / 1e6:g} MPa" + (" (HEDH 4.3.6, SA-515-70 carbon steel plate at 100 degC)" if S == 121e6 else ", as entered")
+
+        R_v = ev.D_s / 2.0 + c
+        t_shell = cylinder_thickness(P_s, R_v, S, E)
+        r.step(f"Shell wall for pressure, corroded inside radius R_v = D_s/2 + c. {material}", "t_shell", "t = P R_v / (S E - 0.6 P)", f"{_n(P_s)} ({_n(R_v)}) / [{_n(S)} ({_n(E)}) - 0.6 ({_n(P_s)})]", t_shell, "m", MEC, "HEDH 4.3.6 Eq. (8), quoting ASME UG-27")
+        t_min = tema_minimum_shell(ev.D_s)
+        t_total = t_shell + c
+        selected = max(t_total, t_min) if t_min is not None else t_total
+        r.step("Shell wall to use: the larger of pressure plus corrosion and the TEMA class R minimum for carbon and low alloy steel", "t_shell,use", "t_use = max(t + c, t_TEMA)", f"max({_n(t_shell)} + {_n(c)}, {_n(t_min) if t_min is not None else 'outside the table'})", selected, "m", MEC, "HEDH 4.3.6 Table 2; HEDH 4.2.6-1")
+        r.output("t_shell_required", "Shell wall for pressure, without corrosion", t_shell, "m", MEC, "HEDH 4.3.6 Eq. (8)")
+        r.output("t_shell_selected", "Shell wall to use", selected, "m", MEC, "HEDH 4.3.6 Table 2")
+
+        t_tube = tube_thickness_internal(P_t, ev.D_i / 2.0, S)
+        r.step("Tube wall for internal pressure. Seamless, so E = 1", "t_tube", "t = P R / (S - 0.6 P), R = D_i/2", f"{_n(P_t)} ({_n(ev.D_i / 2.0)}) / [{_n(S)} - 0.6 ({_n(P_t)})]", t_tube, "m", MEC, "HEDH 4.3.6 Eq. (8), quoting ASME UG-31")
+        r.output("t_tube_required", "Tube wall for internal pressure", t_tube, "m", MEC, "HEDH 4.3.6 Eq. (8)")
+        r.check("Tube wall against internal pressure", g.t_wall >= t_tube, f"t = {g.t_wall * 1e3:.2f} mm >= {t_tube * 1e3:.3f} mm, {material}. External pressure on the tube needs an ASME chart factor that HEDH prints only for its example (Eq. 10); HEDH 4.2.5-1 gives as a guide that a 19 mm x 2.1 mm steel tube withstands 16 MN/m2 internal and 7 MN/m2 external. {statement}", MEC, "HEDH 4.3.6 Sec. D; HEDH 4.2.5-1")
+
+        P = max(P_s, P_t)
+        if g.head_type == HEAD_FIXED:
+            T = tubesheet_rough(ev.D_s)
+            r.step("Tubesheet, fixed: a rough estimate only, because HEDH lists the fixed-tubesheet clauses and does not print the formula", "L_ts", "L_ts = 0.1 D_s", f"0.1 ({_n(ev.D_s)})", T, "m", MEC, "HEDH 3.3.5 Eq. (1); HEDH 4.3.2I")
+            r.output("t_tubesheet", "Tubesheet, rough estimate", T, "m", MEC, "HEDH 3.3.5 Eq. (1)")
+            r.check("Tubesheet shear does not control", None, "No criterion for the rough estimate. A fixed tubesheet carries thermal loads as well as pressure (HEDH 4.3.2I), and neither is in 0.1 D_s.", MEC, "HEDH 4.3.2I")
+            sheet = f"tubesheet about {T * 1e3:.0f} mm by the rough 0.1 D_s"
+        else:
+            G = m.gasket_diameter or ev.D_s
+            T = tubesheet_bending(F_FLOATING_GASKETED, G, P, S)
+            r.step("Tubesheet, gasketed floating head, in bending, at the greater design pressure" + ("" if m.gasket_diameter else ". No gasket diameter entered, so G = D_s, which is low: HEDH 4.3.6 has G = 678 mm in a 635 mm shell"), "T", "T = (F G / 2) (P / S)^(1/2), F = 1.0", f"(1.0 ({_n(G)}) / 2) ({_n(P)} / {_n(S)})^0.5", T, "m", MEC, "HEDH 4.3.6 Eq. (17), TEMA R-7.132 as quoted")
+            r.output("t_tubesheet", "Tubesheet effective thickness, bending", T, "m", MEC, "HEDH 4.3.6 Eq. (17)")
+            r.output("t_tubesheet_total", "Tubesheet with corrosion", T + c, "m", MEC, "HEDH 4.3.2I")
+            ratio, limit = tubesheet_shear_margin(P, S, g.D_o, g.pitch)
+            r.check("Tubesheet shear does not control", ratio < limit, f"P/S = {ratio:.4f} < 1.6 (1 - d_o/p)^2 = {limit:.4f}. Above this the shear Eq. (18) would govern; HEDH does not define its D_L, so that thickness is not calculated.", MEC, "HEDH 4.3.6-13, TEMA R-7.133 as quoted")
+            sheet = f"tubesheet {T * 1e3:.1f} mm effective, plus corrosion {c * 1e3:g} mm and any groove"
+        table_note = f"TEMA class R minimum {t_min * 1e3:.1f} mm" if t_min is not None else f"D_s = {ev.D_s * 1e3:.0f} mm is outside the TEMA table quoted in HEDH 4.2.6-1 (330 to 2540 mm)"
+        r.check("Pressure boundary: shell, tube and tubesheet", None, f"Sized, no verdict: shell {t_shell * 1e3:.2f} mm + {c * 1e3:g} mm corrosion, {table_note}, use {selected * 1e3:.2f} mm; {sheet}. {statement} ASME and TEMA are as quoted in HEDH, 1977/1986 and 1978 editions. Expansion joint, flanges and nozzle reinforcement are not sized.", MEC, "HEDH 4.2.6, 4.3.2, 4.3.6")
+
+    # ------------------------------------------------------------------------------------ vibration
+    @staticmethod
+    def _vibration_values(i: VerticalShellTubeInputs, ev: _Evaluation) -> _Vibration:
+        """Inputs and results of the HEDH 4.6.5 primary check for the central baffle spaces. Chart reads and their uncertainty are in common.mechanical."""
+        g, p, cool = i.geometry, i.condensing, i.coolant_props
+        E, rho_metal, _ = TUBE_METALS[i.mechanical.tube_metal]
+        if ev.shell is not None:
+            s = ev.shell
+            fluid, delta_key, rho_shell, rho_tube = "coolant", "liquid", cool.rho, p.rho_l
+            span = 2.0 * s.L_bc  # HEDH 4.6.2A: window tubes are supported by every second segmental baffle
+            tip = ev.D_s * (0.5 - g.baffle_cut / 100.0)
+            half = ev.d_ctl / 2.0
+            chord = 2.0 * math.sqrt(half**2 - tip**2) if tip < half else ev.d_ctl
+            L_eff = LAYOUT_DATA[g.layout][2] * g.pitch
+            gap = s.L_bc * chord / L_eff * (g.pitch - g.D_o)
+            u_c = 0.8 * ev.shell.m_s * s.S_m / (cool.rho * gap)
+            basis = "80% of the coolant flow through the tube gaps of the row at the baffle tip (HEDH 4.6.3A)"
+        else:
+            fluid, delta_key, rho_shell, rho_tube = "vapour", "gas", p.rho_v, cool.rho
+            span = g.baffle_spacing or g.L  # HEDH 4.6.2A: full support plates hold every tube
+            gap = ev.A_flow
+            u_c = ev.u_vapour
+            basis = "the parallel vapour velocity at the inlet, put through the cross-flow equations as a conservative screen, because HEDH gives no equation for parallel flow and says it is seldom a problem (HEDH 4.6.3B, 4.6.4D)"
+        ratio = g.pitch / g.D_o
+        k = added_mass_coefficient(ratio, g.layout != LAYOUT_90)
+        I = tube_moment_of_inertia(g.D_o, ev.D_i)
+        M_e = effective_mass(g.D_o, ev.D_i, rho_metal, rho_tube, rho_shell, k)
+        C_n = frequency_constant()
+        f_n = natural_frequency(C_n, E, I, M_e, span)
+        delta = LOG_DECREMENT[delta_key]
+        u_crit = critical_velocity(BETA_LOWEST, f_n, g.D_o, M_e, delta, rho_shell)
+        Sr = strouhal_number(LAYOUT_ANGLE[g.layout], ratio)
+        f_vs = vortex_shedding_frequency(Sr, u_c, g.D_o)
+        p_l, p_t = ROW_PITCH[g.layout][0] * g.pitch, ROW_PITCH[g.layout][1] * g.pitch
+        f_tb = buffeting_frequency(u_c, g.D_o, p_l, p_t)
+        return _Vibration(fluid, span, u_c, basis, gap, E, rho_metal, I, k, rho_tube, rho_shell, M_e, C_n, f_n, delta, BETA_LOWEST, u_crit, Sr, f_vs, p_l, p_t, f_tb)
+
+    @classmethod
+    def _vibration(cls, i: VerticalShellTubeInputs, ev: _Evaluation, r: DesignResult) -> None:
+        g = i.geometry
+        z = cls._vibration_values(i, ev)
+        src = "HEDH 4.6"
+        r.step(f"Vibration: effective tube mass. Tube bore taken full of {'condensate, the heaviest case, so the lowest frequency' if ev.shell is not None else 'coolant'}. k read from the chart, +-0.02. E and density of {i.mechanical.tube_metal}, HEDH 5.5.12 at 100 degC", "M_e", "M_e = rho_t (pi/4) D_i^2 + rho_m (pi/4)(D_o^2 - D_i^2) + k rho_s (pi/4) D_o^2", f"{_n(z.rho_tube)} (pi/4) {_n(ev.D_i)}^2 + {_n(z.rho_metal)} (pi/4)({_n(g.D_o)}^2 - {_n(ev.D_i)}^2) + {_n(z.k)} ({_n(z.rho_shell)}) (pi/4) {_n(g.D_o)}^2", z.M_e, "kg/m", MEC, src + ".2A, Fig. 3; HEDH 5.5.12")
+        r.step(f"Vibration: natural frequency of the longest span, L = {_n(z.span)} m. C_n = {_n(z.C_n)}, the lowest curve of the chart, conservative for any span count, equal spans. No axial load", "f_n", "f_n = (C_n / 2 pi) [E I / (M_e L^4)]^(1/2), I = pi (D_o^4 - D_i^4)/64", f"({_n(z.C_n)} / 2 pi) [{_n(z.E)} ({_n(z.I)}) / ({_n(z.M_e)} ({_n(z.span)})^4)]^0.5", z.f_n, "Hz", MEC, src + ".2 Eq. (1), Fig. 2")
+        r.step(f"Vibration: shell-side velocity, {z.u_basis}", "u_c", "u_c = 0.8 M_c / (rho L_bc (chord/L_tp,eff)(L_tp - D_o))" if ev.shell is not None else "u_c = G x_in / rho_G", f"gap area = {_n(z.gap_area)} m2", z.u_c, "m/s", MEC, src + ".3")
+        r.step(f"Vibration: critical velocity for fluid elastic instability. beta = {_n(z.beta)}, the lowest band of the chart for every layout, because the scan does not show clearly which upper band is which, +-0.1. delta_o = {_n(z.delta)} for {'liquids' if ev.shell is not None else 'gases and vapours'}", "u_crit", "u_crit = beta f_n D_o [M_e delta_o / (rho_s D_o^2)]^(1/2)", f"{_n(z.beta)} ({_n(z.f_n)}) ({_n(g.D_o)}) [{_n(z.M_e)} ({_n(z.delta)}) / ({_n(z.rho_shell)} ({_n(g.D_o)})^2)]^0.5", z.u_crit, "m/s", MEC, src + ".4 Eq. (4), Fig. 4")
+        r.step(f"Vibration: vortex shedding frequency. Sr read from the chart at this pitch ratio and layout, +-0.03", "f_vs", "f_vs = Sr u_c / D_o", f"{_n(z.Sr)} ({_n(z.u_c)}) / {_n(g.D_o)}", z.f_vs, "Hz", MEC, src + ".4 Eq. (2), Fig. 2")
+        r.step("Vibration: turbulent buffeting frequency. p_l and p_t from the layout", "f_tb", "f_tb = (u_c D_o / (p_l p_t)) [3.05 (1 - D_o/p_t)^2 + 0.28]", f"({_n(z.u_c)} {_n(g.D_o)} / ({_n(z.p_l)} {_n(z.p_t)})) [3.05 (1 - {_n(g.D_o)}/{_n(z.p_t)})^2 + 0.28]", z.f_tb, "Hz", MEC, src + ".4 Eq. (3)")
+        r.output("f_n", "Tube natural frequency, longest span", z.f_n, "Hz", MEC, "HEDH 4.6.2 Eq. (1)")
+        r.output("u_crit", "Critical velocity, fluid elastic instability", z.u_crit, "m/s", MEC, "HEDH 4.6.4 Eq. (4)")
+        r.output("u_c_vibration", "Shell-side velocity for the vibration screen", z.u_c, "m/s", MEC, "HEDH 4.6.3")
+        r.output("f_vs", "Vortex shedding frequency", z.f_vs, "Hz", MEC, "HEDH 4.6.4 Eq. (2)")
+        r.output("f_tb", "Turbulent buffeting frequency", z.f_tb, "Hz", MEC, "HEDH 4.6.4 Eq. (3)")
+        scope = "Central baffle spaces only; HEDH asks for inlet, central and outlet regions, and the nozzles are not sized here. "
+        r.check("Tube vibration: fluid elastic instability", z.u_c < z.u_crit, f"u_c = {z.u_c:.3f} m/s < u_crit = {z.u_crit:.3f} m/s, with the lowest beta band. {scope}HEDH: vibration and damage are probable if u_c exceeds u_crit.", MEC, "HEDH 4.6.5A step 2")
+        r.check("Tube vibration: vortex shedding", z.f_vs <= 0.8 * z.f_n, f"f_vs = {z.f_vs:.1f} Hz <= 0.8 f_n = {0.8 * z.f_n:.1f} Hz. HEDH: above this vibration is possible, not necessarily damage. Vortex shedding may not exist deep in a tightly spaced bundle.", MEC, "HEDH 4.6.5A step 3")
+        r.check("Tube vibration: turbulent buffeting", z.f_tb <= 0.8 * z.f_n, f"f_tb = {z.f_tb:.1f} Hz <= 0.8 f_n = {0.8 * z.f_n:.1f} Hz." + (" HEDH: Eq. (3) comes from gas data and may not apply to a liquid." if ev.shell is not None else ""), MEC, "HEDH 4.6.5A step 4")
+        if ev.shell is None:
+            u_sound = i.mechanical.u_sound
+            if not u_sound:
+                r.check("Tube vibration: acoustic", None, "Enter the speed of sound in the vapour to assess this. HEDH 4.6.5A step 1 applies to a gas or vapour on the shell side.", MEC, "HEDH 4.6.5A step 1")
+            else:
+                modes = [acoustic_frequency(m, u_sound, ev.D_s) for m in (1, 2, 3, 4)]
+                near = [f for f in modes if abs(z.f_vs - f) <= 0.2 * f or abs(z.f_tb - f) <= 0.2 * f]
+                r.check("Tube vibration: acoustic", not near, f"f_vs = {z.f_vs:.1f} Hz, f_tb = {z.f_tb:.1f} Hz against f_a = {', '.join(f'{f:.1f}' for f in modes)} Hz, modes 1 to 4. Within 20% of any of them acoustic vibration is possible.", MEC, "HEDH 4.6.4 Eq. (6); HEDH 4.6.5A step 1")
 
 
 GRAVITY_FORMULA = {

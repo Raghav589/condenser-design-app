@@ -2,7 +2,7 @@
 
 `condenser_app/common/condensation.py`, `condenser_app/common/properties.py`. Tests: `tests/test_condensation.py`, `tests/test_properties.py`.
 
-Sources were read from page images, because the OCR garbles equations. Keys: **HSB** Hewitt, Shires & Bott; **HEDH** Heat Exchanger Design Handbook; **L24** ME6220 Lecture 24 flooding slide. Nothing is taken from outside the project's supplied material, apart from `app_props.tex` (Incropera, supplied for this project). Constants derived rather than printed are stated, e.g. (4/3)^(1/3) for HEDH's rounded 1.1.
+Sources were read from page images, because the OCR garbles equations. Keys: **HSB** Hewitt, Shires & Bott; **HEDH** Heat Exchanger Design Handbook; **L24** ME6220 Lecture 24 flooding slide. Nothing is taken from outside these sources and `app_props.tex` (Incropera). Constants derived rather than printed are stated, e.g. (4/3)^(1/3) for HEDH's rounded 1.1.
 
 ## Recommended method for vertical in-tube downflow (HSB Sec. 16.3.3)
 
@@ -73,7 +73,7 @@ Not applicable: co-current upflow (HSB gives no combination rule) and reflux. Fo
 | `flooding_c_squared_hedh` | HEDH 45-46, Table 1 | hydraulic | Limit |
 | `english_bevel_factor` | HEDH 3.4.3 Eq. 1 | hydraulic | Checked against HEDH's stated 5, 25, 54% |
 | `english_flooding_raw` | HEDH 3.4.3 Eq. 1; L24 | hydraulic | **Not usable as a mass flux**: output unit not stated |
-| `belter_kutateladze`, `belter_vapour_velocity` | L24 only | hydraulic | Limit; unverified, see gaps |
+| `belter_kutateladze`, `belter_vapour_velocity` | L24 only | hydraulic | Limit; not used by any module, see limits |
 
 ## Benchmark table
 
@@ -175,17 +175,18 @@ Water: HEDH 5.5.3 Table 1 at 5 K to 100 degC and 10 K above, Table 8 at 10 K. c_
 | eps_G | `void_fraction` | - |
 | sin(alpha) | `sin_alpha`, +1 up, -1 down | - |
 
-## Gaps and what the project drive should confirm
+## Limits
 
-- **Friedel for downflow.** HSB says a slightly different correlation applies and does not give it; it uses the printed form in Ex. 16.2 regardless, and so does this library. The real downflow form was not added from memory.
-- **Worked example of Eq. 16.56**: none in the folder, so the combined coefficient has no benchmark. The supplied project examples should be the first check.
+- **Friedel for downflow.** HSB and HEDH 2.3.2 both say a slightly different correlation applies and neither gives it; HSB uses the printed form in Ex. 16.2 regardless, and so does this library. The downflow form was not added from memory.
+- **Friedel constants.** HSB Eqs. 10.49, 10.51 print 3.24 and `(1 - x)^0.24`; HEDH 2.3.2 Eqs. 46, 48 print 3.23 and `(1 - x)^0.224`. This library uses HSB's, because its worked examples do.
+- **Worked example of Eq. 16.56**: no source works one, so the combined coefficient has no benchmark.
 - **Shah (1979), Traviss**: HSB names Shah only (Ch. 20), with no equation; Traviss's correlation does not appear. Neither is implemented. Akers appears for plates only.
 - **Chen's subcooling and inertia correction** exists only as a chart (Fig. 16.3); HEDH's equation form was not located and the correction is not implemented. HSB and HEDH call it small at Pr 1-5. HEDH's rules for reference temperature and effective viscosity are not implemented either: pass properties at the temperature you choose.
 - **Boyko-Kruzhilin range**: HSB states none. Examples cover Re_LO 5381 and 9.43e4.
 - **Blasius**: HSB limits Eq. 2.279 to Re < 2e5 but uses it at Re_GO = 1.97e6. There is no laminar branch for the multipliers.
 - **Premoli bracket** goes negative at high y (e.g. x = 0.85 at Ex. 16.2 conditions). HSB is silent; S = 1 is returned, which is this library's choice. This affects acceleration and gravity terms at high quality.
-- **English et al.**: exponents confirmed by HEDH's stated bevel effects, but neither HEDH nor L24 states the unit of the result. `english_flooding_raw` returns an unnamed number. Trial interpretations do not settle it (for air-water, 25 mm, it gives 8150; HEDH's Wallis form gives 6.5 kg/m2.s).
-- **Belter**: L24 is the only source. The `pi/4` in Fr is dimensionally acceptable but looks odd (flow per perimeter would be d/4, 29% on K_G), and mu_water's temperature is not stated. Check against the textbook when available.
+- **English et al.**: exponents confirmed by HEDH's stated bevel effects, but neither HEDH nor L24 states the unit of the result; HEDH's nomenclature says only "mass velocity". `english_flooding_raw` returns an unnamed number. Trial interpretations do not settle it (for air-water, 25 mm, it gives 8150; HEDH's Wallis form gives 6.5 kg/m2.s; against Holmes's curves in HEDH Fig. 3.4.3(3b), lb/h.ft2 reads 1.7 to 2.1 times high).
+- **Belter**: not used by any module. Only L24 prints it, and no temperature for mu_water is given. The `pi/4` in Fr is dimensionally acceptable, and no second source can test it (flow per perimeter would be d/4, 29% on K_G).
 - **Entrainment** is neglected throughout, as in Ex. 16.2. **Thin film**: at low x the film model is outside its basis; `DownflowLocal.film_thickness` (shear-based) lets a module check. **HEDH F2 table** is incomplete in the source.
 - **`tube_two_phase_pressure_drop`** assumes linear x(z) unless given a profile, uses constant properties, and omits the effect of condensation on wall friction that Sec. 18.4.1 mentions.
 - **Water** ends at 300 degC; **HSB fluids** start at their normal boiling point, so sub-atmospheric organics are out of table and raise ValueError.

@@ -64,7 +64,7 @@ Input classes are dataclasses declared with `inp(label, unit, display_unit=..., 
 - `steps`: the trace, each showing the formula, the numbers and the result
 - `checks`: pass, fail or **not assessed**, with the criterion
 - `convergence`: every iteration's history
-- `assumptions`, `warnings`, `source_gaps`, `references`
+- `design_basis`, `warnings`, `scope_limits`, `references`
 
 Every output, step and check is tagged thermal, hydraulic, geometric, mechanical or selection, so a thermal sizing result can't be mistaken for a mechanical verification.
 

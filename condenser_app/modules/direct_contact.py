@@ -3,7 +3,7 @@
 Sources, all read from page images:
 * HSB Ch. 22 (Eqs 22.1-22.44, Examples 22.1-22.4) and Sec. 17.3.5 (spray and baffle column, Figs 17.18-17.20).
 * HEDH Sec. 2.6.8 (Jacobs): balances Eqs (1)-(3), spray Eqs (4)-(16), sheets, jets and fans Eqs (17)-(63),
-  packed beds Eqs (64)-(65), bubbles Eqs (75)-(89).
+  packed beds Eqs (64)-(65), bubbles Eqs (75)-(89). Symbols from the handbook's general nomenclature, pp. xxi-xxv.
 * ME6220 Lecture 23: jet, spray, bubble column and pool condensers.
 
 Printed errors in the sources, each shown from the book's own numbers, are corrected here and listed in
@@ -43,8 +43,12 @@ DROP_TYPICAL_M = (125e-6, 520e-6)   # HEDH Sec. 2.6.8 A(a)
 DROP_GROWTH_MAX = 1.03      # HSB assumption 6
 CD_RE_RANGE = (6.0, 400.0)  # HSB Eq. 22.4
 PACKED_VELOCITY_LIMIT = 4.0     # HEDH Sec. 2.6.8 B, "below 12 ft/s (~4 m/s)"
+PACKING_UV_MAX = 2.79e6     # W/m3.K. HEDH Sec. 2.6.8 B, "up to 150 000 Btu/h ft3 degF", on small conventional packings
 BUBBLE_RADIUS_CONST_V_M = 1.5e-3    # HEDH Sec. 2.6.8 C
 BUBBLE_MIN_SUBCOOL_PURE_C, BUBBLE_MIN_SUBCOOL_GAS_C = 2.0, 3.5  # HEDH, after Eq. (88)
+BUBBLE_RADIUS_PREFERRED_M = 5e-3    # HEDH Sec. 2.6.8 C, with non-condensable gas
+TAIL_PIPE_HSB_M = 10.0      # HSB p. 725, "about 10 m"
+TAIL_PIPE_HEDH_M = 34.0 * 0.3048    # HEDH Sec. 2.6.8 Fig. 1, "about 34 feet"
 BETA_STATIONARY = 0.1       # HSB Example 22.4, "a value of 0.1 is a reasonable approximation"
 # The small-Gz and large-Gz asymptotes of HEDH Eqs (23)/(25), (34)/(38) and (36)/(40) cross at this utilization.
 # Computed from those pairs of equations; the source does not state a switching value.
@@ -93,7 +97,7 @@ class NonCondensable:
 
 @dataclass
 class SprayData:
-    drop_diameter: float | None = inp("Design (largest) drop diameter", "m", display_unit="mm", required=False, minimum=0, exclusive_minimum=True, help="Nozzle-specific data, from the manufacturer. No source gives it. Use the maximum drop size for preliminary design; a larger size is conservative.", source="HEDH Sec. 2.6.8 A(a); HSB Sec. 22.4.1.1")
+    drop_diameter: float | None = inp("Design (largest) drop diameter", "m", display_unit="mm", required=False, minimum=0, exclusive_minimum=True, help="From the nozzle maker. HEDH's rule: size on the maximum drop size for preliminary design or when the distribution is unknown; a larger size is conservative. HEDH's typical range is 125 to 520 um.", source="HEDH Sec. 2.6.8 A(a); HSB Sec. 22.4.1.1")
     injection_velocity: float | None = inp("Drop injection velocity", "m/s", required=False, minimum=0, exclusive_minimum=True, help="Nozzle-specific data. Vertically downward.", source="HSB Fig. 22.6")
     smallest_drop: float | None = inp("Smallest drop diameter in the spray", "m", display_unit="mm", required=False, minimum=0, exclusive_minimum=True, help="Optional. Sets the entrainment limit on the vapour velocity.", source="HEDH Sec. 2.6.8 A(a)")
     velocity_fraction: float | None = inp("Allowed vapour velocity / terminal velocity of smallest drop", required=False, minimum=0, maximum=1, exclusive_minimum=True, help="Optional. HEDH says 'a fraction' and gives no number, so this is your design decision.")
@@ -114,7 +118,7 @@ class PackedData:
     packing_size: float | None = inp("Packing size", "m", display_unit="mm", required=False, minimum=0, exclusive_minimum=True, source="HSB Eq. 22.28")
     voidage: float | None = inp("Bed voidage (spheres)", required=False, minimum=0, maximum=1, exclusive_minimum=True, help="For spheres D*a = 6(1 - voidage). Give this or the specific area.", source="HSB Eq. 22.33 note")
     specific_area: float | None = inp("Packing surface per unit volume", "m2/m3", required=False, minimum=0, exclusive_minimum=True, help="For packings other than spheres.")
-    U_v: float | None = inp("Measured volumetric heat transfer coefficient", "W/m3.K", required=False, minimum=0, exclusive_minimum=True, help="Optional experimental value. HEDH reports up to 2.79e6 W/m3.K on small packings. Gives a second height from HEDH Eq. (65).", source="HEDH Eqs (64)-(65)")
+    U_v: float | None = inp("Measured volumetric heat transfer coefficient", "W/m3.K", required=False, minimum=0, exclusive_minimum=True, help="Optional experimental value. Gives a second height from HEDH Eq. (65). Empty: HEDH's largest reported value, 2.79e6 W/m3.K on small packings, gives a lower bound on the height.", source="HEDH Eqs (64)-(65)")
     velocity_limit: float | None = inp("Maximum vapour velocity", "m/s", required=False, default=PACKED_VELOCITY_LIMIT, minimum=0, exclusive_minimum=True, help="Above this the vapour strips coolant off the packing.", source="HEDH Sec. 2.6.8 B")
 
 
@@ -461,21 +465,19 @@ class DirectContactModule(CondenserModule):
 
     def design(self, i: DirectContactInputs) -> DesignResult:
         r = DesignResult(module=self.key, title=self.title, references=cite("HSB", "HEDH", "ME6220-L"))
-        r.source_gaps.append(
-            "The project's supplied direct-contact algorithm and data sheet were not available. This module follows HSB Ch. 22 and HEDH Sec. 2.6.8; "
-            "replace or confirm it when the project drive is added."
+        r.design_basis.append("Design basis: HSB Ch. 22 for sizing and HEDH Sec. 2.6.8 for the design limits, because they are the published direct-contact methods and HSB itself points to HEDH 2.6.8 for further reading.")
+        r.scope_limits.append(
+            "Symbols in HEDH Sec. 2.6.8 follow the handbook's general nomenclature, pp. xxi-xxv. The per-part table it refers to is not in the PDF. "
+            "The symbols the PDF leaves undefined, and how this module reads each one, are stated where they are used and in docs/algorithms/direct_contact.md."
         )
-        r.source_gaps.append(
-            "HEDH Sec. 2.6.8 says its nomenclature is at the beginning of Part 2, but no such table is in the available scan. Symbols were read from context; "
-            "the doubtful ones are named in docs/algorithms/direct_contact.md."
-        )
-        r.assumptions.append("Constant coolant properties: reasonable for a coolant rise up to about 30 degC (HEDH Sec. 2.6.8 A(a)). Enter them at the mean coolant temperature. If that mean moves much, re-enter and re-run (HSB Ch. 22, Problem 4).")
+        r.design_basis.append("Constant coolant properties: reasonable for a coolant rise up to about 30 degC (HEDH Sec. 2.6.8 A(a)). Enter them at the mean coolant temperature. If that mean moves much, re-enter and re-run (HSB Ch. 22, Problem 4).")
         r.output("condenser_type", "Condenser type", i.condenser_type, category=Category.SELECTION, source="HSB Sec. 22.3")
 
         b = _solve_balance(i)
         self._balance(r, i, b)
         self._mixed_outlet(r, i, b)
         self._fluid_warnings(r, i, b)
+        self._approach_check(r, i, b)
         if i.condenser_type in (SPRAY, JET, SHEET, FAN, BAFFLE):
             self._coolant_limits(r, i, b)
 
@@ -496,13 +498,13 @@ class DirectContactModule(CondenserModule):
             self._tail_pipe(r, i, b)
         r.check(
             "Nozzle, distributor and vapour pressure drop", None,
-            "No procedure in the sources. HEDH and HSB describe vapour-side pressure drop as low for spray, jet, packed and tray designs, without a calculation.",
+            "Outside this module's scope: no book gives a procedure. HEDH and HSB describe vapour-side pressure drop as low for spray, jet, packed and tray designs, without a calculation.",
             Category.HYDRAULIC, "HEDH Sec. 2.6.8 A-B",
         )
         r.check(
             "Vessel and code requirements", None,
-            "Not assessed. The pressure vessel code (ASME VIII family) and the Heat Exchange Institute standards for direct contact barometric and low-level condensers (cited in HEDH Sec. 3.5) were not available.",
-            Category.MECHANICAL,
+            "Outside this module's scope: the pressure vessel code (ASME VIII family) and the Heat Exchange Institute standards for direct contact barometric and low-level condensers. HEDH Sec. 3.5.4 C cites the HEI standards and quotes no numbers from them. No compliance is claimed.",
+            Category.MECHANICAL, "HEDH Sec. 3.5.4 C",
         )
         return r
 
@@ -510,7 +512,7 @@ class DirectContactModule(CondenserModule):
     def _balance(self, r: DesignResult, i: DirectContactInputs, b: _Balance) -> None:
         v, c, g = i.vapour, i.coolant, i.gas
         T_vap = v.T_in if v.T_in is not None else v.T_sat
-        r.assumptions.append(f"Balance solved for the {b.solved_for}. Coolant and condensate are in thermal contact and leave together; heat losses are neglected.")
+        r.design_basis.append(f"Balance solved for the {b.solved_for}. Coolant and condensate are in thermal contact and leave together; heat losses are neglected.")
 
         if b.m_gas:
             n_v, n_g = b.m_vapour / g.M_vapour, b.m_gas / g.M_gas
@@ -520,12 +522,12 @@ class DirectContactModule(CondenserModule):
             r.step("Vapour partial pressure at the inlet. T_sat must be the saturation temperature at this pressure", "p_v", "y_v P", f"{_n(y_v)}({_n(i.pressure)})", p_v_in, "Pa", source="HEDH Sec. 2.6.8 A(a); HSB Ch. 16")
             r.output("p_vapour_inlet", "Vapour partial pressure at inlet", p_v_in, "Pa", source="HSB Ch. 16")
             r.step(
-                "Vapour lost with the vent. The vent gas is taken as saturated at the vent temperature (assumption; ideal-gas mole balance)",
+                "Vapour lost with the vent. The vent gas is taken as saturated at the vent temperature (ideal-gas mole balance)",
                 "M_vv", "M_g (MW_v/MW_g) p_v,vent/(P - p_v,vent)",
                 f"{_n(b.m_gas)}({_n(g.M_vapour)}/{_n(g.M_gas)})({_n(g.p_v_vent)})/({_n(i.pressure)} - {_n(g.p_v_vent)})",
                 b.m_vent_vapour, "kg/s", source="Mole balance with y = p/P, HSB Ch. 16",
             )
-            r.assumptions.append("The vent stream formula is a mole balance, not a printed equation. The sources show a vent and say the highest gas concentration should meet the coldest coolant (HEDH Sec. 2.6.8), without a vent calculation.")
+            r.design_basis.append("The vent stream formula is a mole balance, not a printed equation. The sources show a vent and say the highest gas concentration should meet the coldest coolant (HEDH Sec. 2.6.8), without a vent calculation.")
 
         r.step("Latent duty", "Q_lat", "M_c h_fg", f"{_n(b.m_condensed)}({_n(v.h_fg)})", b.Q_latent, "W", source=S_BAL)
         if b.Q_superheat:
@@ -597,7 +599,7 @@ class DirectContactModule(CondenserModule):
                 "Immiscible coolant: a separator is needed after the condenser (HSB Fig. 17.19). Economic, trouble-free operation needs low solubility, different specific gravities with no affinity "
                 "for stable emulsions, low viscosities and surface tension, chemical inertness and stability (HEDH Sec. 2.6.8). The separator is not sized here: no source gives a procedure."
             )
-            r.source_gaps.append("Separator or decanter sizing for an immiscible coolant: no procedure in the sources.")
+            r.scope_limits.append("Separator or decanter sizing for an immiscible coolant: no procedure in the sources.")
             rho_c, _ = _condensate_props(i)
             r.output("density_difference", "Condensate - coolant density difference", rho_c - i.coolant.rho, "kg/m3", source="HEDH Sec. 2.6.8 asks for different specific gravities")
         if i.multicomponent_total == "yes":
@@ -609,10 +611,12 @@ class DirectContactModule(CondenserModule):
             if i.gas.soluble == "yes":
                 r.warnings.append("A gas readily absorbed by the coolant can make later gas removal uneconomic, as with H2S at the Geysers plant (HEDH Sec. 2.6.8). Bubble-type condensers can separate even soluble gases if heat transfer outpaces mass transfer; smaller bubbles delay absorption.")
 
+    def _approach_check(self, r: DesignResult, i: DirectContactInputs, b: _Balance) -> None:
+        approach = i.vapour.T_sat - b.T_out
+        r.check("Terminal approach", approach >= APPROACH_MIN_C, f"T_sat - T_Le = {approach:.2f} degC; design limit {APPROACH_MIN_C:g} degC, recommended by Hausbrand and How. Heat transfer decays exponentially, so a closer approach is impractical.", source="HEDH Sec. 2.6.8 A(a), after Hausbrand and How; HSB Sec. 22.4.1.3")
+
     def _coolant_limits(self, r: DesignResult, i: DirectContactInputs, b: _Balance) -> None:
-        c, v = i.coolant, i.vapour
-        approach = v.T_sat - b.T_out
-        r.check("Terminal approach", approach >= APPROACH_MIN_C, f"T_sat - T_Le = {approach:.2f} degC; design limit {APPROACH_MIN_C:g} degC. Heat transfer decays exponentially, so a closer approach is impractical.", source="HEDH Sec. 2.6.8 A(a), after Hausbrand and How; HSB Sec. 22.4.1.3")
+        c = i.coolant
         rise = b.T_out - c.T_in
         r.check("Coolant temperature rise", rise <= COOLANT_RISE_TYPICAL_C, f"T_Le - T_Li = {rise:.1f} degC; typically restricted to about {COOLANT_RISE_TYPICAL_C:g} degC", source="HEDH Sec. 2.6.8 A(a)")
 
@@ -626,7 +630,7 @@ class DirectContactModule(CondenserModule):
         r.check("Large Jakob number range", passed, f"Ja = {ja:.1f}; needs Ja > {JAKOB_MIN:g} for a surface suddenly at T_sat", source="HSB Sec. 22.4.1.1, assumption 4; HEDH Sec. 2.6.8 A")
         if not passed:
             r.warnings.append(f"Ja = {ja:.1f} is below {JAKOB_MIN:g}: the conduction-only result is optimistic. HEDH says the nonlinear problem of its Eqs (9)-(11) must then be solved. It is not solved here.")
-            r.source_gaps.append("Ja below 20: HEDH Eqs (9)-(11) and Figs 9-10 show the effect, but no closed solution or table is given, so the nonlinear conduction problem is not implemented.")
+            r.scope_limits.append("Ja below 20: HEDH Eqs (9)-(11) and Figs 9-10 show the effect, but no closed solution or table is given, so the nonlinear conduction problem is not implemented.")
         return ja
 
     def _kappa_step(self, r: DesignResult, i: DirectContactInputs) -> float:
@@ -639,14 +643,15 @@ class DirectContactModule(CondenserModule):
     def _spray(self, r: DesignResult, i: DirectContactInputs, b: _Balance) -> None:
         c, v, s = i.coolant, i.vapour, i.spray
         d, v_in = s.drop_diameter, s.injection_velocity
-        r.assumptions.append("Spray model: one drop size at the largest diameter (HEDH Sec. 2.6.8 A(a) for preliminary design; HSB says a larger size is conservative), conduction only in the drop, vapour velocity neglected, downward injection (HSB Sec. 22.4.1.1).")
-        r.source_gaps.append("Drop size distribution, HEDH Eqs (5)-(8): the parameters a, delta and D_max are nozzle-specific and were not available, so the integration over the spray is not implemented. HEDH allows the maximum drop size for preliminary design.")
-        r.source_gaps.append("HEDH Eq. (4) keeps the mass-gain term of the drop and the vapour velocity. HSB Eq. 22.1 neglects both, and is what is used here (growth is checked below).")
+        r.design_basis.append("Design basis: one drop size, the maximum drop size. HEDH Sec. 2.6.8 A(a) recommends this for preliminary design or when the distribution parameters are unknown, and HSB Sec. 22.4.1.1 says a larger size is conservative. Conduction only in the drop, vapour velocity neglected, downward injection (HSB Sec. 22.4.1.1).")
+        r.output("drop_basis", "Drop size basis of the height", "maximum drop size", category=Category.SELECTION, source="HEDH Sec. 2.6.8 A(a)")
+        r.scope_limits.append("Outside this module's scope: integrating over the drop size distribution, HEDH Eqs (5)-(8). The parameters a, delta and D_max come from nozzle makers; no book gives values.")
+        r.scope_limits.append("HEDH Eq. (4) keeps the mass-gain term of the drop and the vapour velocity. HSB Eq. 22.1 neglects both, and is what is used here (growth is checked below).")
         low, high = DROP_TYPICAL_M
-        r.check("Typical drop size", low <= d <= high, f"D = {d * 1e6:.0f} um; typical range {low * 1e6:.0f} to {high * 1e6:.0f} um", source="HEDH Sec. 2.6.8 A(a)")
+        r.check("Typical drop size", low <= d <= high, f"D = {d * 1e6:.0f} um; HEDH's typical range is {low * 1e6:.0f} to {high * 1e6:.0f} um. The height above is based on the entered size, and a larger size is conservative.", source="HEDH Sec. 2.6.8 A(a)")
         if i.coolant_relation != SAME:
             r.warnings.append("HSB Sec. 22.4.1.3: these approximate calculations are not adequate when the condensing vapour has different properties from the coolant. HEDH Fig. 9 shows the required height rises significantly when the condensate conductivity is about 10% of the coolant's.")
-            r.source_gaps.append("Spray with a different condensate: HEDH gives only Figs 9-10 and no calculation procedure.")
+            r.scope_limits.append("Spray with a different condensate: HEDH gives only Figs 9-10 and no calculation procedure.")
 
         ja = self._jakob_step(r, i)
         kappa = self._kappa_step(r, i)
@@ -661,7 +666,7 @@ class DirectContactModule(CondenserModule):
         t_series = fo_series * (d / 2) ** 2 / kappa
         r.step("Cross-check on the conduction: the exact series of HEDH Eq. (12), solved for Fo by root finding", "Fo_s", "theta = 1 - (6/pi^2) sum[exp(-n^2 pi^2 Fo)/n^2]", f"{_n(theta)} = 1 - (6/pi^2) sum[exp(-n^2 pi^2 ({_n(fo_series)}))/n^2]", fo_series, source="HEDH Eq. (12), with (R/R_0)^3 = 1 + theta/Ja")
         r.step("Residence time from the series, for comparison only", "t_s", "Fo_s R^2/K_L", f"{_n(fo_series)}({_n(d / 2)})^2/{_n(kappa)}", t_series, "s", source="HEDH Eq. (12)")
-        r.assumptions.append("Fo is solved from the HEDH series by bracketed root finding because the series cannot be inverted. Bracket 1e-7 to 5, stop at |d Fo| < 1e-7. It is a cross-check; the height uses HSB Eq. 22.9.")
+        r.design_basis.append("Fo is solved from the HEDH series by bracketed root finding because the series cannot be inverted. Bracket 1e-7 to 5, stop at |d Fo| < 1e-7. It is a cross-check; the height uses HSB Eq. 22.9.")
 
         gam = gamma_drag(v.rho_v, v.mu_v, c.rho)
         r.step("Drag group. HSB Eq. 22.6 prints nu_G without the exponent; Example 22.1 and its units show nu_G^0.84", "Gamma", "nu_G^0.84 rho_G/rho_L", f"({_n(v.mu_v / v.rho_v)})^0.84({_n(v.rho_v)}/{_n(c.rho)})", gam, "m1.68/s0.84", source="HSB Eq. 22.6 corrected, Example 22.1")
@@ -693,7 +698,7 @@ class DirectContactModule(CondenserModule):
         info.columns, info.rows = ["RK4 steps", "Distance (m)", "Final velocity (m/s)"], passes
         r.convergence.append(info)
         v_grav = passes[-1][2]
-        r.assumptions.append("Why this iterates: with the gravity term HSB Eq. 22.1 has no closed solution, so it is integrated over the residence time by RK4. First guess: the gravity-free distance. Update: double the number of steps. Stop: the distance changes by less than 0.01 mm.")
+        r.design_basis.append("Why this iterates: with the gravity term HSB Eq. 22.1 has no closed solution, so it is integrated over the residence time by RK4. First guess: the gravity-free distance. Update: double the number of steps. Stop: the distance changes by less than 0.01 mm.")
         r.step("Distance travelled with gravity, downward injection, integrated numerically", "x_g", "dV/dt = g(1 - rho_G/rho_L) - 27 Re^-0.84 (3/4D)(rho_G/rho_L) V^2; dx/dt = V; to t", f"V(0) = {_n(v_in)}, t = {_n(t)}: x = {_n(h_grav)}, V(t) = {_n(v_grav)}", h_grav, "m", Category.GEOMETRIC, "HSB Eqs 22.1, 22.4")
         re_grav = v_grav * d * v.rho_v / v.mu_v
         r.check("Drag correlation range, with gravity", lo < min(re_in, re_grav) and max(re_in, re_grav) < hi, f"Re runs from {re_in:.0f} to {re_grav:.0f}; C_D = 27 Re^-0.84 needs {lo:g} < Re < {hi:g}", Category.HYDRAULIC, "HSB Eq. 22.4")
@@ -723,21 +728,21 @@ class DirectContactModule(CondenserModule):
         if s.smallest_drop is not None:
             v_terminal = self._terminal_velocity(r, i)
         else:
-            r.source_gaps.append("Vessel cross-section: HEDH limits the vapour velocity to a fraction of the terminal velocity of the smallest drops. Give the smallest drop size and the fraction to size it.")
+            r.scope_limits.append("Vessel cross-section: HEDH limits the vapour velocity to a fraction of the terminal velocity of the smallest drops. No book gives that fraction, and the smallest drop comes from the nozzle data. Enter both to size the section.")
 
         v_allow = None
         if v_terminal is not None and s.velocity_fraction is not None:
             v_allow = s.velocity_fraction * v_terminal
             r.step("Allowed vapour velocity", "v_allow", "f V_t", f"{_n(s.velocity_fraction)}({_n(v_terminal)})", v_allow, "m/s", Category.HYDRAULIC, "HEDH Sec. 2.6.8 A(a); the fraction f is the user's")
         elif v_terminal is not None:
-            r.source_gaps.append("HEDH gives no number for the fraction of terminal velocity. Enter one to size the cross-section.")
+            r.scope_limits.append("No book gives the fraction of terminal velocity; HEDH says only 'a fraction'. It is a design decision: enter one to size the cross-section.")
 
         area = i.column_area
         if area is None and v_allow is not None:
             area = b.m_vapour / (v.rho_v * v_allow)
             r.step("Vessel cross-section so the smallest drops are not carried out", "S", "M_v/(rho_v v_allow)", f"{_n(b.m_vapour)}/[{_n(v.rho_v)}({_n(v_allow)})]", area, "m2", Category.GEOMETRIC, "HEDH Sec. 2.6.8 A(a)")
         if area is None:
-            r.check("Drop velocity much greater than vapour velocity", None, "No cross-section available to find the vapour velocity.", Category.HYDRAULIC, "HEDH Sec. 2.6.8 A(a)")
+            r.check("Drop velocity much greater than vapour velocity", None, "No cross-section entered or sized, so there is no vapour velocity to compare.", Category.HYDRAULIC, "HEDH Sec. 2.6.8 A(a)")
             return
         v_vap = b.m_vapour / (v.rho_v * area)
         r.step("Vapour velocity", "v_v", "M_v/(rho_v S)", f"{_n(b.m_vapour)}/[{_n(v.rho_v)}({_n(area)})]", v_vap, "m/s", Category.HYDRAULIC, "Continuity")
@@ -771,7 +776,7 @@ class DirectContactModule(CondenserModule):
             v_t, info = fixed_point(update, v0, name="Terminal velocity of the smallest drop", tol=1e-5, max_iter=60)
             info.columns, info.rows = ["Pass", "V guess (m/s)", "Re", "C_D", "V new (m/s)"], passes
             r.convergence.append(info)
-            r.assumptions.append("Why the terminal velocity iterates: C_D depends on Re, which depends on the velocity. First guess: C_D = 1 in HSB Eq. 21.36. Update: Re from the last velocity, C_D from HSB Eq. 22.4, new velocity from Eq. 21.36. Stop: change below 0.01 mm/s.")
+            r.design_basis.append("Why the terminal velocity iterates: C_D depends on Re, which depends on the velocity. First guess: C_D = 1 in HSB Eq. 21.36. Update: Re from the last velocity, C_D from HSB Eq. 22.4, new velocity from Eq. 21.36. Stop: change below 0.01 mm/s.")
             cd_final = passes[-1][3]
             r.step("Terminal velocity of the smallest drop, iterated on the drag coefficient", "V_t", "[4 g D (rho_L - rho_G)/(3 C_D rho_G)]^(1/2), C_D = 27 (V_t D/nu_G)^-0.84", f"[4({GRAVITY:g})({_n(d)})({_n(c.rho)} - {_n(v.rho_v)})/(3({_n(cd_final)})({_n(v.rho_v)}))]^(1/2)", v_t, "m/s", Category.HYDRAULIC, "HSB Eqs 21.36, 22.4")
             re_t = v_t * d / nu
@@ -795,14 +800,14 @@ class DirectContactModule(CondenserModule):
     def _sheet_jet_fan(self, r: DesignResult, i: DirectContactInputs, b: _Balance) -> None:
         c, f = i.coolant, i.film
         kind, theta, u = i.condenser_type, b.theta, f.liquid_velocity
-        r.assumptions.append("Sheet, jet and fan model: uniform velocity, negligible shear, surface at T_sat at once, negligible vapour-side resistance (HSB Sec. 22.4.2; HEDH Sec. 2.6.8 A(b)). The gravity speed-up of a falling liquid is not modelled.")
-        r.assumptions.append(f"Choice of equation: the small-Gz exponential form when theta >= {THETA_ASYMPTOTE_SWITCH:g}, and the large-Gz form below. The pairs of asymptotes cross there (computed); the sources state no switching value.")
-        r.source_gaps.append(
-            "HEDH Eqs (62)-(63), the length for complete use of the coolant at moderate Ja (recommended there for pure vapours), are not used: Re_f is undefined without the nomenclature, and with Re_f = Re_DH "
-            "they give far longer lengths than HSB Example 22.2. Sheet Eqs (45)-(61) need numerical solution and are not implemented."
+        r.design_basis.append("Sheet, jet and fan model: uniform velocity, negligible shear, surface at T_sat at once, negligible vapour-side resistance (HSB Sec. 22.4.2; HEDH Sec. 2.6.8 A(b)). The gravity speed-up of a falling liquid is not modelled.")
+        r.design_basis.append(f"Choice of equation: the small-Gz exponential form when theta >= {THETA_ASYMPTOTE_SWITCH:g}, and the large-Gz form below. The pairs of asymptotes cross there (computed); the sources state no switching value.")
+        r.scope_limits.append(
+            "HEDH Eqs (62)-(63) correlate the length for complete utilization of the coolant (error under 7%), recommended there for pure vapours. This module sizes to a stated utilization below 1, so they do not set the height and are not compared with it. "
+            "The PDF leaves their Re_f undefined; beside Re_DHf in Eqs (47), (53) and (57) it reads as the film Reynolds number on the hydraulic diameter. Outside this module's scope: the numerical sheet solution of Eqs (45)-(61)."
         )
         if b.m_gas:
-            r.source_gaps.append("Sheets, jets and fans with non-condensable gas: only HEDH Figs 13-14 (steam on a water sheet, charts) and Eqs (73)-(74) for a falling film exist. They are not implemented.")
+            r.scope_limits.append("Sheets, jets and fans with non-condensable gas: only HEDH Figs 13-14 (steam on a water sheet, charts) and Eqs (73)-(74) for a falling film exist. They are not implemented.")
         self._jakob_step(r, i)
         kappa = self._kappa_step(r, i)
         self._shear_check(r, i)
@@ -841,7 +846,7 @@ class DirectContactModule(CondenserModule):
         r.step("Residence time", "t", "x/u", f"{_n(x)}/{_n(u)}", t, "s", source=S_SHEET)
         r.output("residence_time", "Residence time", t, "s", source=S_SHEET)
         r.output("column_height", "Required fall length", x, "m", Category.GEOMETRIC, S_SHEET)
-        r.source_gaps.append("Vessel cross-section for jets and sheets: no procedure in the sources.")
+        r.scope_limits.append("Vessel cross-section for jets and sheets: no procedure in the sources.")
         if i.coolant_relation != SAME:
             r.warnings.append("These jet, sheet and fan solutions assume a large Jakob number and the coolant surface at T_sat. HEDH's correction for a different condensate, Eq. (62), is not used (see the gaps).")
 
@@ -849,15 +854,15 @@ class DirectContactModule(CondenserModule):
     def _baffle_column(self, r: DesignResult, i: DirectContactInputs, b: _Balance) -> None:
         c, v, f = i.coolant, i.vapour, i.film
         w, u, spacing = f.liquid_dimension, f.liquid_velocity, f.baffle_spacing
-        r.source_gaps.append(
-            "No source gives a sizing procedure for a baffle column as such. HSB Sec. 17.3.5 and Fig. 17.20 are descriptive. The stage count below is an estimate built from sourced parts: each fall is treated as a "
-            "uniform sheet (HEDH A(b), which names the cascade condenser), with mixing after each stage (HEDH Sec. 2.6.8, stated for packing and said to apply to tray condensers). Curtain thickness and velocity are your inputs."
+        r.scope_limits.append(
+            "Design basis: no baffle column stage procedure is published, and HSB Sec. 17.3.5 and Fig. 17.20 are descriptive. The module's stage count is built from sourced parts: each fall is treated as a "
+            "uniform sheet (HEDH A(b), which names the cascade condenser), with mixing after each stage (HEDH Sec. 2.6.8, stated for packing and said to apply to tray condensers). Curtain thickness and velocity are design inputs."
         )
         r.warnings.append("The baffle count is a preliminary estimate. HSB Fig. 17.20 shows liquid falling in broken drops, not a solid curtain, and HSB Sec. 17.2 says this type has rather lower efficiency than a spray. Heat transfer on the baffle film itself is ignored, which is conservative.")
-        r.source_gaps.append("Film on the baffle: HEDH Eq. (71) and Figs 17-18 treat a falling film with charts whose axes are hard to read, and region II has no general correlation, so they are not used. For a tilted surface HEDH says to use the vertical-plate data with the tangential component of g.")
-        r.source_gaps.append("Baffle column cross-section, baffle cut and vapour-side flooding: no procedure in the sources.")
+        r.scope_limits.append("Film on the baffle: HEDH Eq. (71) and Figs 17-18 treat a falling film with charts whose axes are hard to read, and region II has no general correlation, so they are not used. For a tilted surface HEDH says to use the vertical-plate data with the tangential component of g.")
+        r.scope_limits.append("Outside this module's scope: baffle column cross-section, baffle cut and vapour-side flooding. No book gives a procedure or a number for them.")
         if b.m_gas:
-            r.source_gaps.append("Baffle column with non-condensable gas: no stage procedure in the sources.")
+            r.scope_limits.append("Baffle column with non-condensable gas: no stage procedure in the sources.")
         self._jakob_step(r, i)
         kappa = self._kappa_step(r, i)
         self._shear_check(r, i)
@@ -882,23 +887,23 @@ class DirectContactModule(CondenserModule):
             rows.append([float(n), T, (T - c.T_in) / (v.T_sat - c.T_in)])
         info = ConvergenceInfo("Baffle stage march", True, n, 0.0, 0.0, [row[1] for row in rows], ["Stage", "Coolant T (degC)", "Overall theta"], rows)
         r.convergence.append(info)
-        r.assumptions.append("Why the stages are marched: each fall heats well-mixed liquid toward T_sat, T_n+1 = T_n + theta_s (T_sat - T_n), and the count must be a whole number. Start: the coolant inlet temperature. Stop: the coolant outlet temperature is reached.")
+        r.design_basis.append("Why the stages are marched: each fall heats well-mixed liquid toward T_sat, T_n+1 = T_n + theta_s (T_sat - T_n), and the count must be a whole number. Start: the coolant inlet temperature. Stop: the coolant outlet temperature is reached.")
         exact = math.log(1.0 - b.theta) / math.log(1.0 - theta_s)
-        r.step("Number of falls", "N", "ln(1 - theta)/ln(1 - theta_s), rounded up; the march is in the convergence table", f"ln(1 - {_n(b.theta)})/ln(1 - {_n(theta_s)}) = {_n(exact)}", n, "", Category.GEOMETRIC, "Stage model, see the source gaps")
+        r.step("Number of falls", "N", "ln(1 - theta)/ln(1 - theta_s), rounded up; the march is in the convergence table", f"ln(1 - {_n(b.theta)})/ln(1 - {_n(theta_s)}) = {_n(exact)}", n, "", Category.GEOMETRIC, "Stage model, see the scope limits")
         height = n * spacing
         r.step("Height of the baffled section", "H", "N x_s", f"{n}({_n(spacing)})", height, "m", Category.GEOMETRIC, "Stage model")
         r.output("stage_utilization", "Utilization of one fall", theta_s, source="HSB Eq. 22.17")
-        r.output("n_baffles_estimate", "Number of falls (estimate)", n, "", Category.GEOMETRIC, "Stage model, see the source gaps")
+        r.output("n_baffles_estimate", "Number of falls (estimate)", n, "", Category.GEOMETRIC, "Stage model, see the scope limits")
         r.output("column_height", "Height of the baffled section", height, "m", Category.GEOMETRIC, "Stage model")
 
     # ----------------------------------------------------------------------------------------- packed bed
     def _packed_bed(self, r: DesignResult, i: DirectContactInputs, b: _Balance) -> None:
         c, v, p = i.coolant, i.vapour, i.packed
         d = p.packing_size
-        r.assumptions.append("Packed bed: counterflow with the vapour entering at the base and all of it condensing (HSB Sec. 22.4.3). Jacobs et al. (1979) correlation. Correlates the whole bed; it is not a stage method.")
-        r.check("Correlation range", None, "HSB gives no range for St = 0.40 Ja C^-0.21 H^-0.67 and the original paper is not available.", source="HSB Eq. 22.24")
+        r.design_basis.append("Packed bed: counterflow with the vapour entering at the base and all of it condensing (HSB Sec. 22.4.3). Jacobs et al. (1979) correlation. Correlates the whole bed; it is not a stage method.")
+        r.check("Correlation range", None, "HSB states no range for St = 0.40 Ja C^-0.21 H^-0.67. Its one worked case is Example 22.3: 3.2 cm spheres, voidage 40%, C = 109, Da = 3.6.", source="HSB Eq. 22.24")
         if b.m_gas:
-            r.source_gaps.append("Packed bed with non-condensable gas: HEDH points to work on falling films, Eqs (73)-(74), and no packed-bed procedure is given, so the correlation is applied to the condensed flow only.")
+            r.scope_limits.append("Packed bed with non-condensable gas: HEDH points to work on falling films, Eqs (73)-(74), and no packed-bed procedure is given, so the correlation is applied to the condensed flow only.")
         if p.specific_area is not None:
             a = p.specific_area
             da = d * a
@@ -923,7 +928,7 @@ class DirectContactModule(CondenserModule):
             r.step("Bed cross-section, from the vapour velocity limit", "S", "M_v/(rho_v v_lim)", f"{_n(b.m_vapour)}/[{_n(v.rho_v)}({_n(limit)})]", area, "m2", Category.GEOMETRIC, "HEDH Sec. 2.6.8 B")
         v_vap = b.m_vapour / (v.rho_v * area)
         r.step("Superficial vapour velocity", "v_G", "M_v/(rho_v S)", f"{_n(b.m_vapour)}/[{_n(v.rho_v)}({_n(area)})]", v_vap, "m/s", Category.HYDRAULIC, "HSB Eq. 22.25")
-        r.check("Vapour does not strip the coolant", v_vap <= limit * (1 + 1e-9), f"v_G = {v_vap:.2f} m/s <= {limit:g} m/s", Category.HYDRAULIC, "HEDH Sec. 2.6.8 B")
+        r.check("Vapour does not strip the coolant", v_vap <= limit * (1 + 1e-9), f"v_G = {v_vap:.2f} m/s against {limit:g} m/s. HEDH: typically below 12 ft/s (about 4 m/s).", Category.HYDRAULIC, "HEDH Sec. 2.6.8 B")
         r.check("Flooding of the packing", None, "HSB Fig. 21.19 with Eq. 21.40 needs a packing factor and a chart reading. Not assessed.", Category.HYDRAULIC, "HSB Sec. 21.5.4")
 
         T_avg = 0.5 * (c.T_in + b.T_out)
@@ -951,20 +956,27 @@ class DirectContactModule(CondenserModule):
         r.output("alpha", "Heat transfer coefficient on the packing", alpha, "W/m2.K", source="HSB Eq. 22.25")
         r.output("packing_surface", "Packing surface area", surface, "m2", Category.GEOMETRIC, "HSB Example 22.3")
 
+        u_v = p.U_v if p.U_v is not None else PACKING_UV_MAX
+        z_uv = b.m_coolant * c.cp / (u_v * area) * math.log((v.T_sat - c.T_in) / (v.T_sat - b.T_out))
+        formula_uv = "[M_f c_pf/(U_v S)] ln[(T_sat - T_f,in)/(T_sat - T_f,out)]"
+        subst_uv = f"[{_n(b.m_coolant)}({_n(c.cp)})/({_n(u_v)}({_n(area)}))] ln[({_n(v.T_sat)} - {_n(c.T_in)})/({_n(v.T_sat)} - {_n(b.T_out)})]"
         if p.U_v is not None:
-            z_uv = b.m_coolant * c.cp / (p.U_v * area) * math.log((v.T_sat - c.T_in) / (v.T_sat - b.T_out))
-            r.step("Bed height from a measured volumetric coefficient, for comparison", "Z_v", "[M_f c_pf/(U_v S)] ln[(T_sat - T_f,in)/(T_sat - T_f,out)]", f"[{_n(b.m_coolant)}({_n(c.cp)})/({_n(p.U_v)}({_n(area)}))] ln[({_n(v.T_sat)} - {_n(c.T_in)})/({_n(v.T_sat)} - {_n(b.T_out)})]", z_uv, "m", Category.GEOMETRIC, "HEDH Eq. (65)")
+            r.step("Bed height from a measured volumetric coefficient, for comparison", "Z_v", formula_uv, subst_uv, z_uv, "m", Category.GEOMETRIC, "HEDH Eq. (65)")
             r.output("height_volumetric", "Bed height from the measured U_v", z_uv, "m", Category.GEOMETRIC, "HEDH Eq. (65)")
+            r.check("Measured U_v within the reported values", p.U_v <= PACKING_UV_MAX, f"U_v = {p.U_v:.3g} W/m3.K; HEDH reports values up to {PACKING_UV_MAX:.3g} W/m3.K on small conventional packings.", source="HEDH Sec. 2.6.8 B")
         else:
-            r.source_gaps.append("HEDH Eq. (65) needs a measured volumetric coefficient for the packing. HEDH says data are referenced but not included. Enter one to get the second height.")
+            r.step(f"Minimum bed height, at HEDH's largest reported volumetric coefficient. {PACKING_UV_MAX:.3g} W/m3.K is the book's upper value for small conventional packings, so this height is a lower bound, not a design height", "Z_v,min", formula_uv, subst_uv, z_uv, "m", Category.GEOMETRIC, "HEDH Sec. 2.6.8 B, Eq. (65)")
+            r.output("height_volumetric_min", "Lower bound on the bed height, at HEDH's upper U_v", z_uv, "m", Category.GEOMETRIC, "HEDH Sec. 2.6.8 B, Eq. (65)")
+            r.check("Bed height above the U_v lower bound", z >= z_uv, f"Z = {z:.3f} m against the lower bound {z_uv:.4f} m at U_v = {PACKING_UV_MAX:.3g} W/m3.K.", Category.GEOMETRIC, "HEDH Sec. 2.6.8 B, Eq. (65)")
+            r.design_basis.append("HEDH references volumetric coefficients for particular packings and does not print them; U_v depends on the flows and the packing. Enter a measured value for a second design height.")
 
     # ----------------------------------------------------------------------------------------- bubble column
     def _bubble_column(self, r: DesignResult, i: DirectContactInputs, b: _Balance) -> None:
         c, v, s = i.coolant, i.vapour, i.bubble
         d0 = s.bubble_diameter
         T_inf = s.T_pool if s.T_pool is not None else b.T_out
-        r.assumptions.append(f"Surrounding liquid at {T_inf:.2f} degC: " + ("given by the user." if s.T_pool is not None else "the coolant outlet temperature, because the hottest liquid gives the slowest collapse."))
-        r.assumptions.append("Heat-transfer-controlled collapse with no condensate film effect (HSB Sec. 22.4.4). In highly subcooled liquid HEDH says collapse is dominated by liquid inertia; no procedure is given for that.")
+        r.design_basis.append(f"Surrounding liquid at {T_inf:.2f} degC: " + ("given by the user." if s.T_pool is not None else "the coolant outlet temperature, because the hottest liquid gives the slowest collapse."))
+        r.design_basis.append("Heat-transfer-controlled collapse with no condensate film effect (HSB Sec. 22.4.4). In highly subcooled liquid HEDH says collapse is dominated by liquid inertia; no procedure is given for that.")
         kappa = self._kappa_step(r, i)
         ja = c.rho * c.cp * (v.T_sat - T_inf) / (v.rho_v * v.h_fg)
         r.step("Bubble Jakob number", "Ja'", "rho_L c_pL (T_sat - T_inf)/(rho_G h_LG)", f"{_n(c.rho)}({_n(c.cp)})({_n(v.T_sat)} - {_n(T_inf)})/[{_n(v.rho_v)}({_n(v.h_fg)})]", ja, source="HSB Eq. 22.34")
@@ -975,7 +987,7 @@ class DirectContactModule(CondenserModule):
             k_v = 0.25 * pr ** (-1.0 / 3.0)
             r.step("Correction for a bubble in an immiscible liquid. K_v = 1 for a bubble in its own liquid", "K_v", "0.25 Pr^(-1/3)", f"0.25({_n(pr)})^(-1/3)", k_v, source="HEDH after Eq. (77)")
         elif i.coolant_relation == MISCIBLE:
-            r.source_gaps.append("Bubble in a miscible different liquid: HEDH Eq. (76) covers dilute mixtures but needs diffusivity data. Treated as K_v = 1.")
+            r.scope_limits.append("Bubble in a miscible different liquid: HEDH Eq. (76) covers dilute mixtures but needs diffusivity data. Treated as K_v = 1.")
 
         cd = s.drag_coefficient if s.drag_coefficient is not None else 0.5
         buoy = 4.0 / 3.0 * GRAVITY * (c.rho - v.rho_v) / (cd * c.rho)
@@ -998,7 +1010,8 @@ class DirectContactModule(CondenserModule):
 
         r.check("Constant-velocity bubble model", d0 / 2 > BUBBLE_RADIUS_CONST_V_M, f"R_0 = {d0 / 2 * 1e3:.2f} mm; a constant rise velocity needs R_0 > {BUBBLE_RADIUS_CONST_V_M * 1e3:g} mm", Category.HYDRAULIC, "HEDH Sec. 2.6.8 C")
         if d0 / 2 <= BUBBLE_RADIUS_CONST_V_M:
-            r.source_gaps.append("Bubbles below 1.5 mm radius: HEDH Eqs (79)-(86) (Dimic) apply, but use symbols not defined in the available text. They are not implemented.")
+            r.scope_limits.append("Outside this module's scope: bubbles below 1.5 mm radius. HEDH Eqs (79)-(86) (Dimic) apply there, but the PDF leaves their H_d and the a of Eq. (84) undefined, so they are not implemented.")
+        self._bubble_radius_note(r, i, b)
 
         fo_s = stationary_bubble_fourier(ja)
         t_s = fo_s * d0**2 / (4.0 * kappa)
@@ -1017,6 +1030,17 @@ class DirectContactModule(CondenserModule):
             self._bubble_stepped(r, d0, ja, kappa, k_v, buoy, t_c)
         self._bubble_train(r, i, b, vel, pe)
 
+    def _bubble_radius_note(self, r: DesignResult, i: DirectContactInputs, b: _Balance) -> None:
+        r0 = i.bubble.bubble_diameter / 2.0
+        if not b.m_gas:
+            r.design_basis.append(f"HEDH's preference for {BUBBLE_RADIUS_PREFERRED_M * 1e3:g} mm radius bubbles concerns non-condensable gas. This vapour is pure, so the preference does not set the size here.")
+            return
+        soluble = i.gas.soluble == "yes"
+        detail = f"R_0 = {r0 * 1e3:.2f} mm. HEDH: uniformly mixed gas collapses faster and describes bubbles over 4 mm radius, the diffusion model those under 3 mm, so a {BUBBLE_RADIUS_PREFERRED_M * 1e3:g} mm radius is generally better than a smaller one."
+        if soluble:
+            detail += " Exception, which applies here: a gas that dissolves. Smaller bubbles delay absorption, as with H2S."
+        r.check("Bubble radius with non-condensable gas", soluble or r0 >= BUBBLE_RADIUS_PREFERRED_M, detail, Category.GEOMETRIC, "HEDH Sec. 2.6.8 C")
+
     def _bubble_stepped(self, r: DesignResult, d0, ja, kappa, k_v, buoy, t_first) -> None:
         passes: list[list[float]] = []
         state = {"steps": 8}
@@ -1032,7 +1056,7 @@ class DirectContactModule(CondenserModule):
         info.columns, info.rows = ["Diameter steps", "Collapse time (s)", "Rise height (m)"], passes
         r.convergence.append(info)
         z_step = passes[-1][2]
-        r.assumptions.append("Why the bubble collapse is stepped: HSB Example 22.4 says the constant-velocity estimate may be too short, and that the time should be divided into steps with the terminal velocity of each stage. First guess: the constant-velocity time. Update: double the diameter steps. Stop: the time changes by less than 0.01%.")
+        r.design_basis.append("Why the bubble collapse is stepped: HSB Example 22.4 says the constant-velocity estimate may be too short, and that the time should be divided into steps with the terminal velocity of each stage. First guess: the constant-velocity time. Update: double the diameter steps. Stop: the time changes by less than 0.01%.")
         r.step("Collapse time in steps, with v = [(4/3) D g (rho_L - rho_G)/(C_D rho_L)]^(1/2) at each stage", "t_st", "sum of dD D^(1/2)/[(4/pi^(1/2)) (K_v K_L v)^(1/2) Ja']", f"{int(passes[-1][0])} steps from D = {_n(d0)} to 0", t_step, "s", source="HSB Eq. 22.41, Example 22.4 closing remark")
         r.step("Rise height in steps", "z_st", "sum of v dt", f"{int(passes[-1][0])} steps", z_step, "m", Category.GEOMETRIC, "HSB Eq. 22.41")
         r.check("Fixed drag coefficient while stepping", None, "C_D is held constant as the bubble shrinks, as in HSB Example 22.4. No source gives C_D for the collapsing bubble.", Category.HYDRAULIC, "HSB Example 22.4")
@@ -1043,53 +1067,60 @@ class DirectContactModule(CondenserModule):
         c, v, s = i.coolant, i.vapour, i.bubble
         min_subcool = BUBBLE_MIN_SUBCOOL_GAS_C if b.m_gas else BUBBLE_MIN_SUBCOOL_PURE_C
         subcool = v.T_sat - c.T_in
+        kind = "with non-condensable gas" if b.m_gas else "pure vapour"
+        r.check("Subcooling range of the correlation", subcool > min_subcool, f"T_sat - T_coolant,in = {subcool:.1f} degC against more than {min_subcool:g} degC, {kind}. Below this the column height rises rapidly (Fig. 24).", source="HEDH after Eq. (88)")
         if s.release_frequency is None or s.nozzle_spacing is None or (b.m_gas and s.beta_final is None):
             needed = "the release frequency, the nozzle spacing and the final radius ratio" if b.m_gas else "the release frequency and the nozzle spacing"
-            r.source_gaps.append(f"Column height: HSB says it depends on the number of sources and the release frequency, and HEDH Eqs (87)-(88) are the recommended correlations. They need {needed}, set by the injector design, so no column height is given.")
+            r.scope_limits.append(f"Column height: HSB says it depends on the number of sources and the release frequency, and HEDH Eqs (87)-(88) are the recommended correlations. They need {needed}, set by the injector design, so no column height is given.")
             r.warnings.append("No column height: enter the injector data for HEDH Eq. (87) or (88). The single-bubble rise height is not a column height.")
             return
         r0 = s.bubble_diameter / 2.0
         ja_star = c.cp * subcool / v.h_fg
         r.step("Jakob number of the correlation, at the coolant inlet", "Ja*", "c_pf (T_sat - T_coolant,in)/h_fg", f"{_n(c.cp)}({_n(subcool)})/{_n(v.h_fg)}", ja_star, source="HEDH after Eq. (78)")
-        r.check("Subcooling range of the correlation", subcool > min_subcool, f"T_sat - T_coolant,in = {subcool:.1f} degC > {min_subcool:g} degC. Below this the height rises rapidly (Fig. 24).", source="HEDH after Eq. (88)")
         group_core = (v.rho_v / c.rho) * (s.release_frequency * r0 / vel) ** 0.054 / ((s.nozzle_spacing / (2.0 * r0)) ** 0.028 * math.sinh(ja_star))
         if b.m_gas:
             ratio = 0.686 * pe**0.5 * group_core * math.exp(2.4063 * s.beta_final)
-            formula = "0.686 Pe^(1/2) (rho_v/rho_f)(f R_0/U)^0.054 exp(2.4063 beta_f)/[(L/2R_0)^0.028 sinh Ja*]"
+            formula = "0.686 Pe^(1/2) (rho_v/rho_f)(f R_0/U_inf)^0.054 exp(2.4063 beta_f)/[(L/2R_0)^0.028 sinh Ja*]"
             subst = f"0.686({_n(pe)})^(1/2)({_n(v.rho_v)}/{_n(c.rho)})({_n(s.release_frequency)}({_n(r0)})/{_n(vel)})^0.054 exp(2.4063({_n(s.beta_final)}))/[({_n(s.nozzle_spacing)}/{_n(2 * r0)})^0.028 sinh({_n(ja_star)})]"
             source = "HEDH Eq. (88)"
         else:
             ratio = 1.0415 * pe**0.5 * group_core
-            formula = "1.0415 Pe^(1/2) (rho_v/rho_f)(f R_0/U)^0.054/[(L/2R_0)^0.028 sinh Ja*]"
+            formula = "1.0415 Pe^(1/2) (rho_v/rho_f)(f R_0/U_inf)^0.054/[(L/2R_0)^0.028 sinh Ja*]"
             subst = f"1.0415({_n(pe)})^(1/2)({_n(v.rho_v)}/{_n(c.rho)})({_n(s.release_frequency)}({_n(r0)})/{_n(vel)})^0.054/[({_n(s.nozzle_spacing)}/{_n(2 * r0)})^0.028 sinh({_n(ja_star)})]"
             source = "HEDH Eq. (87)"
         r.step("Collapse height ratio, multiple bubble trains in counterflow. HEDH recommends this for sizing discrete bubble columns", "H/R_0", formula, subst, ratio, source=source)
         height = ratio * r0
         r.step("Column height to collapse", "H", "(H/R_0) R_0", f"{_n(ratio)}({_n(r0)})", height, "m", Category.GEOMETRIC, source)
-        r.source_gaps.append("HEDH Eqs (87)-(88): f, U and L are undefined without the nomenclature. Taken as release frequency, bubble rise velocity and nozzle spacing, with Pe on the initial diameter as in HSB Eq. 22.44. HEDH's Figs 25-26 show pentane and isobutane in water only; their axis labels print Pe, not Pe^(1/2), but Fig. 24 supports the 1/2 power.")
+        r.design_basis.append("HEDH Eqs (87)-(88), symbols. The handbook's general nomenclature (pp. xxi-xxv) gives f as a frequency in 1/s and L as a length; this module reads them as the release frequency per nozzle and the nozzle spacing. The PDF leaves U_inf, Ja*_0 and the length in Pe undefined; this module reads U_inf as the bubble rise velocity, Ja*_0 as Ja* at the coolant inlet, and Pe on the initial diameter as in HSB Eq. 22.44.")
+        r.scope_limits.append("HEDH's Figs 25-26 show pentane and isobutane in water only. Their axis labels print Pe, not Pe^(1/2); Fig. 24 supports the 1/2 power of the equations.")
         vol_bubble = math.pi / 6.0 * s.bubble_diameter**3
         n_nozzle = b.m_vapour / (v.rho_v * s.release_frequency * vol_bubble)
         r.step("Number of nozzles to pass the vapour", "N", "M_v/(rho_v f (pi/6) D_0^3)", f"{_n(b.m_vapour)}/[{_n(v.rho_v)}({_n(s.release_frequency)})(pi/6)({_n(s.bubble_diameter)})^3]", n_nozzle, "", Category.GEOMETRIC, "Continuity")
         plan = math.ceil(n_nozzle) * s.nozzle_spacing**2
-        r.step("Plan area on a square pitch (assumption: HEDH says only 'uniformly spaced nozzles')", "S", "N L^2", f"{math.ceil(n_nozzle)}({_n(s.nozzle_spacing)})^2", plan, "m2", Category.GEOMETRIC, "Geometry, assumption")
+        r.step("Plan area on a square pitch, because HEDH says only 'uniformly spaced nozzles'", "S", "N L^2", f"{math.ceil(n_nozzle)}({_n(s.nozzle_spacing)})^2", plan, "m2", Category.GEOMETRIC, "Geometry")
         r.output("column_height", "Column height to collapse", height, "m", Category.GEOMETRIC, source)
         r.output("nozzle_count", "Number of nozzles", math.ceil(n_nozzle), "", Category.GEOMETRIC, "Continuity")
-        r.output("column_area", "Plan area on a square pitch", plan, "m2", Category.GEOMETRIC, "Geometry, assumption")
+        r.output("column_area", "Plan area on a square pitch", plan, "m2", Category.GEOMETRIC, "Geometry")
 
     # ----------------------------------------------------------------------------------------- pool
     def _pool(self, r: DesignResult, b: _Balance) -> None:
         r.output("balances_only", "Sizing supported by the sources", "balances only", category=Category.SELECTION, source="HSB Sec. 17.3.5; HEDH Sec. 2.6.8 C")
-        r.source_gaps.append(
-            "Pool condenser: balances only. HSB Sec. 17.3.5 and Lecture 23 only describe it. HEDH says large vapour jets need experimental data; its one correlation, St = 6.5 Re^-0.4 (Eq. 89), is for coaxial steam and water jets at high "
+        r.scope_limits.append(
+            "Outside this module's scope: pool sizing. Pool condenser: balances only. HSB Sec. 17.3.5 and Lecture 23 only describe it. HEDH says large vapour jets need experimental data; its one correlation, St = 6.5 Re^-0.4 (Eq. 89), is for coaxial steam and water jets at high "
             "subcooling, and HEDH says more data are needed for low to moderate subcooling. Vapour injected as discrete bubbles can be sized with the bubble_column type."
         )
-        r.warnings.append("No pool size, depth or injector design is calculated: the sources do not support one.")
+        r.warnings.append("No pool size, depth or injector design is calculated: no book gives a procedure for one.")
         r.check("Pool depth and injector", None, "No procedure in the sources.", Category.GEOMETRIC, "HEDH Sec. 2.6.8 C")
 
     # ----------------------------------------------------------------------------------------- tail pipe
     def _tail_pipe(self, r: DesignResult, i: DirectContactInputs, b: _Balance) -> None:
         rho_mix = r.get("rho_outlet")
         h = (i.p_atm - i.pressure) / (rho_mix * GRAVITY)
-        r.step("Barometric tail pipe: liquid column that balances the vacuum, above the hot well level (hydrostatics; the sources describe it and show about 10 m, 34 ft, for a high vacuum)", "H_tail", "(p_atm - P)/(rho_m g)", f"({_n(i.p_atm)} - {_n(i.pressure)})/[{_n(rho_mix)}({GRAVITY:g})]", h, "m", Category.HYDRAULIC, "HSB Sec. 22.3.1; HEDH Fig. 1")
+        r.step("Barometric tail pipe: liquid column that balances the vacuum, above the hot well level (hydrostatics; the books describe it and show about 10 m, 34 ft, for a high vacuum)", "H_tail", "(p_atm - P)/(rho_m g)", f"({_n(i.p_atm)} - {_n(i.pressure)})/[{_n(rho_mix)}({GRAVITY:g})]", h, "m", Category.HYDRAULIC, "HSB Sec. 22.3.1; HEDH Fig. 1")
         r.output("tail_pipe_height", "Barometric tail pipe liquid column", h, "m", Category.HYDRAULIC, "HSB Sec. 22.3.1")
-        r.source_gaps.append("Tail pipe: the sources give no allowance for flow friction, seal margin or pipe diameter. This is the static column only.")
+        r.check(
+            "Tail pipe against the published length", h <= TAIL_PIPE_HEDH_M,
+            f"Static column {h:.2f} m against about {TAIL_PIPE_HSB_M:g} m (HSB p. 725) and about 34 ft = {TAIL_PIPE_HEDH_M:.2f} m (HEDH Fig. 1). Passes when the longer published length holds the column. The difference is not a sized margin.",
+            Category.HYDRAULIC, "HSB Sec. 22.3.1; HEDH Fig. 1",
+        )
+        r.scope_limits.append("Outside this module's scope: tail pipe friction, seal margin and pipe diameter. No book gives an allowance for them, so this is the static column only.")
